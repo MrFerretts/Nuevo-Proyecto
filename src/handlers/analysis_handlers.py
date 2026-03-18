@@ -11,9 +11,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY
-from src.services.stats_service import FootballStatsService, LEAGUE_IDS, LEAGUE_NAMES
+from src.services.stats_service import FootballStatsService, LEAGUE_IDS, LEAGUE_NAMES, LEAGUE_TO_ODDS_SPORT
 from src.services.football_data_service import FootballDataService, COMPETITION_MAP
-from src.services.odds_service import get_upcoming_games
+from src.services.odds_service import get_upcoming_games, get_match_odds
 from src.services.analysis_engine import (
     TeamAnalysis, analyze_form, analyze_goals, analyze_h2h,
     find_team_in_standings, estimate_probabilities, find_value_bets,
@@ -348,8 +348,8 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     # Probabilidades (ahora con Poisson + ajustes)
     probs = estimate_probabilities(home_analysis, away_analysis, h2h)
 
-    # Cuotas del mercado
-    odds = await _get_market_odds(fixture, home_name, away_name)
+    # Cuotas del mercado (usando el sport_key correcto para la liga)
+    odds = await _get_odds_for_match(league_id, fixture, home_name, away_name)
 
     # Value bets
     suggestions = find_value_bets(probs, odds)
@@ -409,25 +409,23 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
     probs = estimate_probabilities(home_analysis, away_analysis, h2h)
 
-    odds = _extract_embedded_odds(fixture, home_name)
+    odds = _extract_embedded_odds(fixture, home_name, away_name)
     if not any(v > 0 for v in odds.values()):
-        odds = await _get_market_odds(fixture, home_name, away_name)
+        odds = await _get_odds_for_match(league_id, fixture, home_name, away_name)
 
     suggestions = find_value_bets(probs, odds)
 
     return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
 
 
-def _extract_embedded_odds(fixture: dict, home_name: str) -> dict:
-    """Extrae cuotas del _odds_data embebido desde The Odds API."""
-    odds_result = {
-        "home": 0, "draw": 0, "away": 0,
-        "over15": 0, "under15": 0,
-        "over25": 0, "under25": 0,
-        "over35": 0, "under35": 0,
-        "btts_yes": 0, "btts_no": 0,
-        "home_or_draw": 0, "away_or_draw": 0, "home_or_away": 0,
-    }
+def _extract_embedded_odds(fixture: dict, home_name: str, away_name: str) -> dict:
+    """Extrae cuotas del _odds_data embebido desde The Odds API.
+
+    Usa fuzzy matching para asignar correctamente las cuotas a home/away.
+    """
+    from src.services.odds_service import _empty_odds, _fuzzy_match
+
+    odds_result = _empty_odds()
     bookmakers = fixture.get("_odds_data", [])
     if not bookmakers:
         return odds_result
@@ -436,75 +434,64 @@ def _extract_embedded_odds(fixture: dict, home_name: str) -> dict:
         for market in bk.get("markets", []):
             if market["key"] == "h2h":
                 for o in market.get("outcomes", []):
-                    if o["name"].lower() in home_name.lower() or home_name.lower() in o["name"].lower():
-                        odds_result["home"] = max(odds_result["home"], o["price"])
-                    elif o["name"] == "Draw":
+                    if o["name"] == "Draw":
                         odds_result["draw"] = max(odds_result["draw"], o["price"])
-                    else:
+                    elif _fuzzy_match(o["name"], home_name):
+                        odds_result["home"] = max(odds_result["home"], o["price"])
+                    elif _fuzzy_match(o["name"], away_name):
                         odds_result["away"] = max(odds_result["away"], o["price"])
             elif market["key"] == "totals":
                 for o in market.get("outcomes", []):
+                    point = o.get("point", 2.5)
+                    price = o.get("price", 0)
                     if o["name"] == "Over":
-                        odds_result["over25"] = max(odds_result["over25"], o["price"])
+                        if point == 1.5:
+                            odds_result["over15"] = max(odds_result["over15"], price)
+                        elif point == 2.5:
+                            odds_result["over25"] = max(odds_result["over25"], price)
+                        elif point == 3.5:
+                            odds_result["over35"] = max(odds_result["over35"], price)
                     elif o["name"] == "Under":
-                        odds_result["under25"] = max(odds_result["under25"], o["price"])
+                        if point == 1.5:
+                            odds_result["under15"] = max(odds_result["under15"], price)
+                        elif point == 2.5:
+                            odds_result["under25"] = max(odds_result["under25"], price)
+                        elif point == 3.5:
+                            odds_result["under35"] = max(odds_result["under35"], price)
     return odds_result
 
 
-async def _get_market_odds(fixture: dict, home_name: str, away_name: str) -> dict:
-    """Intenta obtener cuotas del mercado para el partido."""
-    odds_result = {
-        "home": 0, "draw": 0, "away": 0,
-        "over15": 0, "under15": 0,
-        "over25": 0, "under25": 0,
-        "over35": 0, "under35": 0,
-        "btts_yes": 0, "btts_no": 0,
-        "home_or_draw": 0, "away_or_draw": 0, "home_or_away": 0,
-    }
+async def _get_odds_for_match(league_id: int, fixture: dict, home_name: str, away_name: str) -> dict:
+    """Obtiene cuotas usando el sport_key correcto para la liga.
+
+    1. Determina el sport_key basándose en league_id
+    2. Usa get_match_odds que verifica AMBOS equipos y asigna home/away correctamente
+    3. Si no encuentra con la liga específica, intenta Champions League como fallback
+    """
+    from src.services.odds_service import _empty_odds
 
     if not ODDS_API_KEY:
-        return odds_result
+        return _empty_odds()
 
-    # Mapear liga a sport_key de The Odds API
-    sport_keys = [
-        "soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champions_league",
-        "soccer_germany_bundesliga", "soccer_italy_serie_a", "soccer_france_ligue_one",
-    ]
+    # Determinar sport_key correcto para esta liga
+    sport_key = LEAGUE_TO_ODDS_SPORT.get(league_id)
 
-    for sport_key in sport_keys:
-        games = await get_upcoming_games(sport_key, limit=20)
-        if not games:
+    if sport_key:
+        odds = await get_match_odds(sport_key, home_name, away_name)
+        if any(v > 0 for v in odds.values()):
+            return odds
+
+    # Fallback: probar Champions League y Europa League si no se encontró
+    fallback_keys = ["soccer_uefa_champs_league", "soccer_uefa_europa_league"]
+    for fk in fallback_keys:
+        if fk == sport_key:
             continue
+        odds = await get_match_odds(fk, home_name, away_name)
+        if any(v > 0 for v in odds.values()):
+            return odds
 
-        for game in games:
-            game_home = game.get("home_team", "").lower()
-            game_away = game.get("away_team", "").lower()
-
-            # Match fuzzy
-            if (home_name.lower() in game_home or game_home in home_name.lower() or
-                    away_name.lower() in game_away or game_away in away_name.lower()):
-
-                bookmakers = game.get("bookmakers", [])
-                if bookmakers:
-                    for bk in bookmakers:
-                        for market in bk.get("markets", []):
-                            if market["key"] == "h2h":
-                                for o in market.get("outcomes", []):
-                                    if o["name"].lower() in game_home:
-                                        odds_result["home"] = max(odds_result["home"], o["price"])
-                                    elif o["name"] == "Draw":
-                                        odds_result["draw"] = max(odds_result["draw"], o["price"])
-                                    else:
-                                        odds_result["away"] = max(odds_result["away"], o["price"])
-                            elif market["key"] == "totals":
-                                for o in market.get("outcomes", []):
-                                    if o["name"] == "Over":
-                                        odds_result["over25"] = max(odds_result["over25"], o["price"])
-                                    elif o["name"] == "Under":
-                                        odds_result["under25"] = max(odds_result["under25"], o["price"])
-                    return odds_result
-
-    return odds_result
+    logger.warning(f"No se encontraron cuotas para {home_name} vs {away_name} (league_id={league_id})")
+    return _empty_odds()
 
 
 async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,7 +600,7 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
                     )
 
                 probs = estimate_probabilities(home_analysis, away_analysis, h2h)
-                odds = await _get_market_odds(fixture, home_info.get("name", ""), away_info.get("name", ""))
+                odds = await _get_odds_for_match(league_id, fixture, home_info.get("name", ""), away_info.get("name", ""))
                 suggestions = find_value_bets(probs, odds)
 
                 for s in suggestions:
