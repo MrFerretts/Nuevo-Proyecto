@@ -37,7 +37,6 @@ def get_stats_service() -> FootballStatsService:
     return stats_service
 
 
-@admin_only
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Inicia el análisis de un partido. Uso: /analizar"""
     if not FOOTBALL_API_KEY:
@@ -265,7 +264,6 @@ async def _get_market_odds(fixture: dict, home_name: str, away_name: str) -> dic
     return odds_result
 
 
-@admin_only
 async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Escanea múltiples ligas buscando oportunidades automáticamente."""
     if not FOOTBALL_API_KEY:

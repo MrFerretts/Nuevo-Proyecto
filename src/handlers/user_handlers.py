@@ -12,6 +12,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_user(user.id, user.username or "", user.first_name or "")
 
     keyboard = [
+        [InlineKeyboardButton("🔬 Analizar Partido", callback_data="analizar"),
+         InlineKeyboardButton("🔍 Oportunidades", callback_data="oportunidades")],
         [InlineKeyboardButton("📊 Estadísticas", callback_data="stats"),
          InlineKeyboardButton("🏟 Partidos", callback_data="games")],
         [InlineKeyboardButton("📋 Últimos Tips", callback_data="tips"),
@@ -22,11 +24,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 ¡Hola *{user.first_name}*!\n\n"
         f"Bienvenido al *Bot de Apuestas Deportivas* 🏆\n\n"
         f"Aquí recibirás tips de apuestas con análisis detallado.\n\n"
-        f"📌 *Comandos disponibles:*\n"
-        f"/stats - Ver estadísticas del canal\n"
-        f"/tips - Ver últimos tips\n"
+        f"📌 *Comandos principales:*\n"
+        f"/analizar - Analizar un partido específico\n"
+        f"/oportunidades - Mejores apuestas del día\n"
         f"/partidos - Ver próximos partidos\n"
-        f"/vip - Info sobre suscripción VIP\n"
+        f"/stats - Estadísticas del canal\n"
         f"/ayuda - Ver todos los comandos\n",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -36,7 +38,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📌 *COMANDOS DISPONIBLES*\n\n"
-        "👤 *Usuarios:*\n"
+        "🔬 *Análisis:*\n"
+        "/analizar - Análisis completo de un partido\n"
+        "/oportunidades - Escanear ligas buscando value bets\n\n"
+        "👤 *General:*\n"
         "/start - Iniciar el bot\n"
         "/stats - Estadísticas del canal\n"
         "/tips - Últimos 10 tips\n"
@@ -44,8 +49,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/vip - Info VIP\n"
         "/ayuda - Este mensaje\n\n"
         "🔧 *Admin:*\n"
-        "/analizar - Análisis completo de un partido\n"
-        "/oportunidades - Escanear ligas buscando value bets\n"
         "/newtip - Crear nuevo tip\n"
         "/resultado - Actualizar resultado de tip\n"
         "/admin - Panel de administración\n",
@@ -115,7 +118,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "stats":
+    if query.data == "analizar":
+        await query.edit_message_text(
+            "🔬 Usa el comando /analizar para analizar un partido.\n\n"
+            "Te mostrará las ligas disponibles, seleccionas una, "
+            "luego el partido, y recibirás un análisis completo con apuestas de valor."
+        )
+        return
+
+    elif query.data == "oportunidades":
+        await query.edit_message_text(
+            "🔍 Usa el comando /oportunidades para escanear todas las ligas.\n\n"
+            "El bot analizará los próximos partidos de las principales ligas "
+            "y te mostrará las mejores apuestas con valor del día."
+        )
+        return
+
+    elif query.data == "stats":
         stats = await get_stats(30)
         await query.edit_message_text(format_stats(stats), parse_mode="Markdown")
 
