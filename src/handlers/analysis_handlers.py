@@ -10,7 +10,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY, ANTHROPIC_API_KEY
+from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY, GROQ_API_KEY
 from src.services.stats_service import FootballStatsService, LEAGUE_IDS, LEAGUE_NAMES, LEAGUE_TO_ODDS_SPORT
 from src.services.football_data_service import FootballDataService, COMPETITION_MAP
 from src.services.odds_service import get_upcoming_games, get_match_odds
@@ -51,9 +51,9 @@ ai_service = None
 def get_ai_service() -> AIAnalysisService | None:
     """Obtiene AIAnalysisService si hay API key configurada."""
     global ai_service
-    if ai_service is None and ANTHROPIC_API_KEY:
-        ai_service = AIAnalysisService(ANTHROPIC_API_KEY)
-        logger.info("AI Analysis Service inicializado")
+    if ai_service is None and GROQ_API_KEY:
+        ai_service = AIAnalysisService(GROQ_API_KEY)
+        logger.info("AI Analysis Service inicializado (Groq)")
     return ai_service
 
 

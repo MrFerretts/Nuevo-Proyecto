@@ -1,18 +1,17 @@
-"""Servicio de análisis con IA (Claude) para contexto inteligente.
+"""Servicio de análisis con IA para contexto inteligente.
 
-Toma las estadísticas calculadas por el motor de análisis y genera
-insights contextuales que el modelo Poisson no puede captar:
+Usa Groq (gratis, rapidísimo) con Llama 3 para generar insights
+contextuales que el modelo Poisson no puede captar:
 - Derbis, rivalidades históricas
 - Contexto de temporada (descenso, título, clasificación europea)
 - Rachas y momentum
 - Factores tácticos implícitos en los números
 - Ajustes de confianza basados en calidad de datos
 
-Requiere: ANTHROPIC_API_KEY en .env
+Requiere: GROQ_API_KEY en .env (gratis en https://console.groq.com/)
 """
 
 import logging
-import json
 
 import aiohttp
 
@@ -20,14 +19,46 @@ from src.services.analysis_engine import TeamAnalysis, BetSuggestion
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://api.anthropic.com/v1/messages"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 class AIAnalysisService:
-    """Genera análisis contextual usando Claude."""
+    """Genera análisis contextual usando Groq (Llama 3)."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
+
+    async def _call_groq(self, prompt: str, max_tokens: int = 800) -> str | None:
+        """Hace una llamada a la API de Groq (compatible con OpenAI)."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.7,
+                }
+
+                async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error(f"Groq API error {resp.status}: {error[:200]}")
+                        return None
+
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Error en Groq API: {e}")
+            return None
 
     async def generate_ai_analysis(
         self,
@@ -46,35 +77,7 @@ class AIAnalysisService:
             return None
 
         prompt = self._build_prompt(home, away, h2h, probs, suggestions, league_name)
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                }
-                payload = {
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 800,
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-
-                async with session.post(API_URL, headers=headers, json=payload) as resp:
-                    if resp.status != 200:
-                        error = await resp.text()
-                        logger.error(f"Claude API error {resp.status}: {error[:200]}")
-                        return None
-
-                    data = await resp.json()
-                    content = data.get("content", [])
-                    if content and content[0].get("type") == "text":
-                        return content[0]["text"]
-                    return None
-
-        except Exception as e:
-            logger.error(f"Error en AI analysis: {e}")
-            return None
+        return await self._call_groq(prompt, max_tokens=800)
 
     def _build_prompt(
         self,
@@ -85,7 +88,7 @@ class AIAnalysisService:
         suggestions: list[BetSuggestion],
         league_name: str,
     ) -> str:
-        """Construye el prompt para Claude con todas las estadísticas."""
+        """Construye el prompt con todas las estadísticas."""
 
         # Resumen de value bets
         bets_text = ""
@@ -161,11 +164,7 @@ IMPORTANTE: Sé directo, no repitas las estadísticas que ya di. Dame SOLO insig
         self,
         opportunities: list[dict],
     ) -> str | None:
-        """Genera un resumen IA de las mejores oportunidades del día.
-
-        Args:
-            opportunities: Lista de dicts con 'match', 'league', 'suggestion'
-        """
+        """Genera un resumen IA de las mejores oportunidades del día."""
         if not self.api_key or not opportunities:
             return None
 
@@ -193,27 +192,4 @@ Responde en español con este formato (máximo 500 caracteres):
 
 Sé breve y directo. No repitas los datos, solo da tu veredicto."""
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                }
-                payload = {
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-
-                async with session.post(API_URL, headers=headers, json=payload) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.json()
-                    content = data.get("content", [])
-                    if content and content[0].get("type") == "text":
-                        return content[0]["text"]
-                    return None
-        except Exception as e:
-            logger.error(f"Error en AI tips summary: {e}")
-            return None
+        return await self._call_groq(prompt, max_tokens=500)
