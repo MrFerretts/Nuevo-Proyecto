@@ -54,7 +54,8 @@ Bot de Telegram para gestionar un canal de tips de apuestas deportivas con model
 
 ### 3. Obtener API Keys
 1. **The Odds API** (cuotas en vivo): Regístrate en [the-odds-api.com](https://the-odds-api.com/) - Gratis: 500 requests/mes
-2. **API-Football** (estadísticas y análisis): Regístrate en [api-football.com](https://www.api-football.com/) - Gratis: 100 requests/día
+2. **football-data.org** (estadísticas actuales, RECOMENDADO): Regístrate en [football-data.org](https://www.football-data.org/) - Gratis: 10 req/min, 12 ligas top
+3. **API-Football** (estadísticas, fallback): Regístrate en [api-football.com](https://www.api-football.com/) - Gratis: 100 requests/día
 
 ### 4. Configurar el proyecto
 ```bash

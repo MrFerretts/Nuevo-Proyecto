@@ -1,18 +1,26 @@
-"""Handlers para análisis de partidos y búsqueda de oportunidades."""
+"""Handlers para análisis de partidos y búsqueda de oportunidades.
 
+Usa football-data.org como fuente primaria (datos actuales, gratis 10 req/min)
+y API-Football como fallback para ligas no cubiertas.
+"""
+
+import logging
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from src.config import ADMIN_ID, FOOTBALL_API_KEY, ODDS_API_KEY
+from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY
 from src.services.stats_service import FootballStatsService, LEAGUE_IDS, LEAGUE_NAMES
+from src.services.football_data_service import FootballDataService, COMPETITION_MAP
 from src.services.odds_service import get_upcoming_games
 from src.services.analysis_engine import (
     TeamAnalysis, analyze_form, analyze_goals, analyze_h2h,
     find_team_in_standings, estimate_probabilities, find_value_bets,
     format_analysis_report,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def admin_only(func):
@@ -28,6 +36,7 @@ def admin_only(func):
 SELECT_LEAGUE, SELECT_MATCH = range(2)
 
 stats_service = None
+fd_service = None
 
 
 def get_stats_service() -> FootballStatsService:
@@ -37,14 +46,28 @@ def get_stats_service() -> FootballStatsService:
     return stats_service
 
 
+def get_fd_service():
+    """Obtiene FootballDataService si hay API key configurada."""
+    global fd_service
+    if fd_service is None and FOOTBALL_DATA_API_KEY:
+        fd_service = FootballDataService(FOOTBALL_DATA_API_KEY)
+    return fd_service
+
+
+def can_use_fd(league_id: int) -> bool:
+    """Verifica si football-data.org soporta esta liga en el plan gratuito."""
+    return FOOTBALL_DATA_API_KEY and COMPETITION_MAP.get(league_id) is not None
+
+
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Inicia el análisis de un partido. Uso: /analizar"""
-    if not FOOTBALL_API_KEY:
+    if not FOOTBALL_API_KEY and not FOOTBALL_DATA_API_KEY:
         await update.message.reply_text(
-            "❌ *FOOTBALL\\_API\\_KEY no configurada*\n\n"
-            "Necesitas una API key de api-football.com (gratis: 100 req/día)\n"
-            "Regístrate en: https://www.api-football.com/\n"
-            "Luego añádela al .env",
+            "❌ *Necesitas al menos una API key de estadísticas*\n\n"
+            "Opciones (ambas gratuitas):\n"
+            "1. football-data.org (10 req/min): https://www.football-data.org/\n"
+            "2. api-football.com (100 req/día): https://www.api-football.com/\n\n"
+            "Añade FOOTBALL\\_DATA\\_API\\_KEY o FOOTBALL\\_API\\_KEY al .env",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
@@ -76,13 +99,28 @@ async def select_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⏳ Buscando próximos partidos...")
 
-    service = get_stats_service()
     season = datetime.now().year
-    # Si estamos en enero-junio, la temporada europea empezó el año anterior
     if datetime.now().month <= 6:
         season -= 1
 
-    fixtures = await service.get_upcoming_fixtures(league_id, season, next_n=10)
+    fixtures = []
+    use_fd = False
+
+    # Intentar football-data.org primero (datos actuales, más requests gratis)
+    if can_use_fd(league_id):
+        fd = get_fd_service()
+        comp_code = COMPETITION_MAP[league_id]
+        fd_matches = await fd.get_upcoming_matches(comp_code, limit=10)
+        if fd_matches:
+            use_fd = True
+            fixtures = _convert_fd_fixtures(fd_matches)
+            logger.info(f"Using football-data.org for league {league_id} ({comp_code}): {len(fixtures)} fixtures")
+
+    # Fallback a API-Football / Odds API
+    if not fixtures and FOOTBALL_API_KEY:
+        service = get_stats_service()
+        fixtures = await service.get_upcoming_fixtures(league_id, season, next_n=10)
+
     if not fixtures:
         await query.edit_message_text(
             f"❌ No hay próximos partidos en {LEAGUE_NAMES.get(league_id, 'esta liga')}."
@@ -91,6 +129,7 @@ async def select_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["analysis_fixtures"] = fixtures
     context.user_data["analysis_season"] = season
+    context.user_data["analysis_use_fd"] = use_fd
 
     keyboard = []
     for i, fx in enumerate(fixtures):
@@ -102,13 +141,36 @@ async def select_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"fixture_{i}",
         )])
 
+    source = "football-data.org" if use_fd else "API-Football"
     await query.edit_message_text(
-        f"🏟 *Próximos partidos - {LEAGUE_NAMES.get(league_id, '')}*\n\n"
+        f"🏟 *Próximos partidos - {LEAGUE_NAMES.get(league_id, '')}*\n"
+        f"📡 Fuente: {source}\n\n"
         "Selecciona el partido a analizar:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
     return SELECT_MATCH
+
+
+def _convert_fd_fixtures(fd_matches: list) -> list:
+    """Convierte partidos de football-data.org al formato interno."""
+    fixtures = []
+    for m in fd_matches:
+        home_team = m.get("homeTeam", {})
+        away_team = m.get("awayTeam", {})
+        fixtures.append({
+            "fixture": {
+                "id": m.get("id", ""),
+                "date": m.get("utcDate", ""),
+            },
+            "teams": {
+                "home": {"id": home_team.get("id"), "name": home_team.get("name", "?")},
+                "away": {"id": away_team.get("id"), "name": away_team.get("name", "?")},
+            },
+            "_source": "football-data.org",
+            "_fd_match_id": m.get("id"),
+        })
+    return fixtures
 
 
 async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,11 +186,15 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fixture = fixtures[idx]
     league_id = context.user_data["analysis_league_id"]
     season = context.user_data["analysis_season"]
+    use_fd = context.user_data.get("analysis_use_fd", False)
 
     await query.edit_message_text("🔬 Analizando partido... Esto puede tomar unos segundos.")
 
     try:
-        report = await run_full_analysis(fixture, league_id, season)
+        if use_fd and can_use_fd(league_id):
+            report = await run_fd_analysis(fixture, league_id)
+        else:
+            report = await run_full_analysis(fixture, league_id, season)
         # Telegram limita mensajes a 4096 chars
         if len(report) > 4096:
             parts = [report[i:i+4096] for i in range(0, len(report), 4096)]
@@ -138,13 +204,88 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text(report, parse_mode="Markdown")
     except Exception as e:
+        logger.error(f"Analysis error: {e}", exc_info=True)
         await query.edit_message_text(f"❌ Error en el análisis: {e}")
 
     return ConversationHandler.END
 
 
+async def run_fd_analysis(fixture: dict, league_id: int) -> str:
+    """Análisis usando football-data.org (datos actuales de temporada)."""
+    fd = get_fd_service()
+    comp_code = COMPETITION_MAP[league_id]
+
+    home_info = fixture.get("teams", {}).get("home", {})
+    away_info = fixture.get("teams", {}).get("away", {})
+    home_id = home_info.get("id")
+    away_id = away_info.get("id")
+    home_name = home_info.get("name", "Local")
+    away_name = away_info.get("name", "Visitante")
+
+    # Obtener datos desde football-data.org
+    home_matches = await fd.get_team_matches(home_id, limit=15) if home_id else []
+    away_matches = await fd.get_team_matches(away_id, limit=15) if away_id else []
+    standings = await fd.get_standings(comp_code)
+
+    # H2H: usar match_id si disponible
+    h2h_data = {}
+    h2h_matches = []
+    fd_match_id = fixture.get("_fd_match_id")
+    if fd_match_id:
+        h2h_data, h2h_matches = await fd.get_head_to_head(fd_match_id, limit=10)
+
+    # Calcular estadísticas con el servicio de football-data.org
+    home_stats = fd.calc_team_stats(home_matches, home_id)
+    away_stats = fd.calc_team_stats(away_matches, away_id)
+    h2h = fd.calc_h2h_stats(h2h_matches, home_id) if h2h_matches else {
+        "home_wins": 0, "away_wins": 0, "draws": 0,
+        "avg_goals": 0, "btts_pct": 0,
+    }
+
+    # Clasificación
+    home_standing = fd.find_in_standings(standings, home_id)
+    away_standing = fd.find_in_standings(standings, away_id)
+
+    # Construir TeamAnalysis
+    home_analysis = TeamAnalysis(
+        name=home_name,
+        form_score=home_stats["form_score"],
+        form_detail=home_stats["form_detail"],
+        goals_scored_avg=home_stats["goals_scored_avg"],
+        goals_conceded_avg=home_stats["goals_conceded_avg"],
+        over25_pct=home_stats["over25_pct"],
+        btts_pct=home_stats["btts_pct"],
+        clean_sheets_pct=home_stats["clean_sheet_pct"],
+        league_position=home_standing["position"],
+        points=home_standing["points"],
+    )
+    away_analysis = TeamAnalysis(
+        name=away_name,
+        form_score=away_stats["form_score"],
+        form_detail=away_stats["form_detail"],
+        goals_scored_avg=away_stats["goals_scored_avg"],
+        goals_conceded_avg=away_stats["goals_conceded_avg"],
+        over25_pct=away_stats["over25_pct"],
+        btts_pct=away_stats["btts_pct"],
+        clean_sheets_pct=away_stats["clean_sheet_pct"],
+        league_position=away_standing["position"],
+        points=away_standing["points"],
+    )
+
+    # Probabilidades
+    probs = estimate_probabilities(home_analysis, away_analysis, h2h)
+
+    # Cuotas del mercado
+    odds = await _get_market_odds(fixture, home_name, away_name)
+
+    # Value bets
+    suggestions = find_value_bets(probs, odds)
+
+    return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+
+
 async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
-    """Ejecuta el análisis completo de un partido."""
+    """Análisis usando API-Football (fallback)."""
     service = get_stats_service()
 
     home_info = fixture.get("teams", {}).get("home", {})
@@ -154,28 +295,19 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     home_name = home_info.get("name", "Local")
     away_name = away_info.get("name", "Visitante")
 
-    # Recoger datos (los endpoints con 'last' funcionan en plan gratuito)
     home_form_fixtures = await service.get_team_form(home_id, last=10) if home_id else []
     away_form_fixtures = await service.get_team_form(away_id, last=10) if away_id else []
     h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=10) if (home_id and away_id) else []
     standings = await service.get_standings(league_id, season)
 
-    # Analizar forma
     home_form_score, home_form_detail = analyze_form(home_form_fixtures, home_id)
     away_form_score, away_form_detail = analyze_form(away_form_fixtures, away_id)
-
-    # Analizar goles
     home_goals = analyze_goals(home_form_fixtures, home_id)
     away_goals = analyze_goals(away_form_fixtures, away_id)
-
-    # Analizar H2H
     h2h = analyze_h2h(h2h_fixtures, home_id)
-
-    # Clasificación
     home_standing = find_team_in_standings(standings, home_id)
     away_standing = find_team_in_standings(standings, away_id)
 
-    # Construir TeamAnalysis
     home_analysis = TeamAnalysis(
         name=home_name,
         form_score=home_form_score,
@@ -202,18 +334,14 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
         points=away_standing["points"],
     )
 
-    # Estimar probabilidades
     probs = estimate_probabilities(home_analysis, away_analysis, h2h)
 
-    # Obtener cuotas: primero de _odds_data embebido, luego buscar en The Odds API
     odds = _extract_embedded_odds(fixture, home_name)
     if not any(v > 0 for v in odds.values()):
         odds = await _get_market_odds(fixture, home_name, away_name)
 
-    # Encontrar value bets
     suggestions = find_value_bets(probs, odds)
 
-    # Generar reporte
     return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
 
 
@@ -294,16 +422,15 @@ async def _get_market_odds(fixture: dict, home_name: str, away_name: str) -> dic
 
 async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Escanea múltiples ligas buscando oportunidades automáticamente."""
-    if not FOOTBALL_API_KEY:
+    if not FOOTBALL_API_KEY and not FOOTBALL_DATA_API_KEY:
         await update.message.reply_text(
-            "❌ Configura FOOTBALL\\_API\\_KEY en .env primero.",
+            "❌ Configura FOOTBALL\\_DATA\\_API\\_KEY o FOOTBALL\\_API\\_KEY en .env primero.",
             parse_mode="Markdown",
         )
         return
 
     await update.message.reply_text("🔍 Escaneando ligas en busca de oportunidades... Esto puede tomar 1-2 minutos.")
 
-    service = get_stats_service()
     season = datetime.now().year
     if datetime.now().month <= 6:
         season -= 1
@@ -312,52 +439,111 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     for league_name, league_id in LEAGUE_IDS.items():
         try:
-            fixtures = await service.get_upcoming_fixtures(league_id, season, next_n=3)
+            use_fd = can_use_fd(league_id)
+
+            if use_fd:
+                # Usar football-data.org (datos actuales, más requests)
+                fd = get_fd_service()
+                comp_code = COMPETITION_MAP[league_id]
+                fd_matches = await fd.get_upcoming_matches(comp_code, limit=3)
+                fixtures = _convert_fd_fixtures(fd_matches) if fd_matches else []
+                standings_fd = await fd.get_standings(comp_code) if fd_matches else []
+            else:
+                fixtures = []
+                standings_fd = []
+
+            # Fallback a API-Football si no hay datos de FD
+            if not fixtures and FOOTBALL_API_KEY:
+                service = get_stats_service()
+                fixtures = await service.get_upcoming_fixtures(league_id, season, next_n=3)
+
             if not fixtures:
                 continue
 
-            standings = await service.get_standings(league_id, season)
-
-            for fixture in fixtures[:2]:  # Analizar top 2 por liga para no gastar requests
+            for fixture in fixtures[:2]:
                 home_info = fixture.get("teams", {}).get("home", {})
                 away_info = fixture.get("teams", {}).get("away", {})
                 home_id = home_info.get("id")
                 away_id = away_info.get("id")
 
-                home_form = await service.get_team_form(home_id, last=7)
-                away_form = await service.get_team_form(away_id, last=7)
-                h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=5)
+                if use_fd and standings_fd:
+                    # Análisis con football-data.org
+                    home_matches = await fd.get_team_matches(home_id, limit=10) if home_id else []
+                    away_matches = await fd.get_team_matches(away_id, limit=10) if away_id else []
 
-                home_form_score, home_detail = analyze_form(home_form, home_id)
-                away_form_score, away_detail = analyze_form(away_form, away_id)
-                home_goals = analyze_goals(home_form, home_id)
-                away_goals = analyze_goals(away_form, away_id)
-                h2h = analyze_h2h(h2h_fixtures, home_id)
-                home_standing = find_team_in_standings(standings, home_id)
-                away_standing = find_team_in_standings(standings, away_id)
+                    home_stats = fd.calc_team_stats(home_matches, home_id)
+                    away_stats = fd.calc_team_stats(away_matches, away_id)
 
-                home_analysis = TeamAnalysis(
-                    name=home_info.get("name", "?"),
-                    form_score=home_form_score, form_detail=home_detail,
-                    goals_scored_avg=home_goals["scored_avg"],
-                    goals_conceded_avg=home_goals["conceded_avg"],
-                    over25_pct=home_goals["over25_pct"],
-                    btts_pct=home_goals["btts_pct"],
-                    clean_sheets_pct=home_goals["clean_sheet_pct"],
-                    league_position=home_standing["position"],
-                    points=home_standing["points"],
-                )
-                away_analysis = TeamAnalysis(
-                    name=away_info.get("name", "?"),
-                    form_score=away_form_score, form_detail=away_detail,
-                    goals_scored_avg=away_goals["scored_avg"],
-                    goals_conceded_avg=away_goals["conceded_avg"],
-                    over25_pct=away_goals["over25_pct"],
-                    btts_pct=away_goals["btts_pct"],
-                    clean_sheets_pct=away_goals["clean_sheet_pct"],
-                    league_position=away_standing["position"],
-                    points=away_standing["points"],
-                )
+                    h2h = {"home_wins": 0, "away_wins": 0, "draws": 0, "avg_goals": 0, "btts_pct": 0}
+                    fd_match_id = fixture.get("_fd_match_id")
+                    if fd_match_id:
+                        _, h2h_matches = await fd.get_head_to_head(fd_match_id, limit=5)
+                        if h2h_matches:
+                            h2h = fd.calc_h2h_stats(h2h_matches, home_id)
+
+                    home_standing = fd.find_in_standings(standings_fd, home_id)
+                    away_standing = fd.find_in_standings(standings_fd, away_id)
+
+                    home_analysis = TeamAnalysis(
+                        name=home_info.get("name", "?"),
+                        form_score=home_stats["form_score"], form_detail=home_stats["form_detail"],
+                        goals_scored_avg=home_stats["goals_scored_avg"],
+                        goals_conceded_avg=home_stats["goals_conceded_avg"],
+                        over25_pct=home_stats["over25_pct"],
+                        btts_pct=home_stats["btts_pct"],
+                        clean_sheets_pct=home_stats["clean_sheet_pct"],
+                        league_position=home_standing["position"],
+                        points=home_standing["points"],
+                    )
+                    away_analysis = TeamAnalysis(
+                        name=away_info.get("name", "?"),
+                        form_score=away_stats["form_score"], form_detail=away_stats["form_detail"],
+                        goals_scored_avg=away_stats["goals_scored_avg"],
+                        goals_conceded_avg=away_stats["goals_conceded_avg"],
+                        over25_pct=away_stats["over25_pct"],
+                        btts_pct=away_stats["btts_pct"],
+                        clean_sheets_pct=away_stats["clean_sheet_pct"],
+                        league_position=away_standing["position"],
+                        points=away_standing["points"],
+                    )
+                else:
+                    # Análisis con API-Football
+                    service = get_stats_service()
+                    home_form = await service.get_team_form(home_id, last=7)
+                    away_form = await service.get_team_form(away_id, last=7)
+                    h2h_fx = await service.get_head_to_head(home_id, away_id, last=5)
+                    standings = await service.get_standings(league_id, season)
+
+                    home_form_score, home_detail = analyze_form(home_form, home_id)
+                    away_form_score, away_detail = analyze_form(away_form, away_id)
+                    home_goals = analyze_goals(home_form, home_id)
+                    away_goals = analyze_goals(away_form, away_id)
+                    h2h = analyze_h2h(h2h_fx, home_id)
+                    home_standing = find_team_in_standings(standings, home_id)
+                    away_standing = find_team_in_standings(standings, away_id)
+
+                    home_analysis = TeamAnalysis(
+                        name=home_info.get("name", "?"),
+                        form_score=home_form_score, form_detail=home_detail,
+                        goals_scored_avg=home_goals["scored_avg"],
+                        goals_conceded_avg=home_goals["conceded_avg"],
+                        over25_pct=home_goals["over25_pct"],
+                        btts_pct=home_goals["btts_pct"],
+                        clean_sheets_pct=home_goals["clean_sheet_pct"],
+                        league_position=home_standing["position"],
+                        points=home_standing["points"],
+                    )
+                    away_analysis = TeamAnalysis(
+                        name=away_info.get("name", "?"),
+                        form_score=away_form_score, form_detail=away_detail,
+                        goals_scored_avg=away_goals["scored_avg"],
+                        goals_conceded_avg=away_goals["conceded_avg"],
+                        over25_pct=away_goals["over25_pct"],
+                        btts_pct=away_goals["btts_pct"],
+                        clean_sheets_pct=away_goals["clean_sheet_pct"],
+                        league_position=away_standing["position"],
+                        points=away_standing["points"],
+                    )
 
                 probs = estimate_probabilities(home_analysis, away_analysis, h2h)
                 odds = await _get_market_odds(fixture, home_info.get("name", ""), away_info.get("name", ""))
@@ -371,7 +557,7 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
                         "suggestion": s,
                     })
         except Exception:
-            continue  # Skip liga si falla
+            continue
 
     if not all_suggestions:
         await update.message.reply_text(
