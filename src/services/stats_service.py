@@ -1,6 +1,11 @@
+import logging
+from datetime import datetime, timedelta
+
 import aiohttp
 from typing import Optional
 
+
+logger = logging.getLogger(__name__)
 
 API_BASE = "https://v3.football.api-sports.io"
 
@@ -20,15 +25,23 @@ class FootballStatsService:
 
     async def _get(self, endpoint: str, params: dict) -> Optional[dict]:
         async with aiohttp.ClientSession() as session:
+            url = f"{API_BASE}/{endpoint}"
+            logger.info(f"API Request: {url} params={params}")
             async with session.get(
-                f"{API_BASE}/{endpoint}",
+                url,
                 headers=self.headers,
                 params=params,
             ) as resp:
                 if resp.status != 200:
+                    logger.error(f"API Error: status={resp.status} for {endpoint}")
                     return None
                 data = await resp.json()
-                return data.get("response", [])
+                errors = data.get("errors", {})
+                if errors:
+                    logger.error(f"API Errors: {errors} for {endpoint} params={params}")
+                results = data.get("response", [])
+                logger.info(f"API Response: {endpoint} returned {len(results) if isinstance(results, list) else 'dict'} results")
+                return results
 
     async def get_team_id(self, team_name: str, country: str = "") -> Optional[int]:
         """Busca el ID de un equipo por nombre."""
@@ -77,8 +90,37 @@ class FootballStatsService:
         return results[0] if results else None
 
     async def get_upcoming_fixtures(self, league_id: int, season: int = None, next_n: int = 10) -> list:
-        """Próximos partidos de una liga."""
-        # El parámetro 'next' no es compatible con 'season' en API-Football
+        """Próximos partidos de una liga.
+
+        Usa rango de fechas (hoy + 14 días) con season para máxima compatibilidad.
+        Si no encuentra con season, intenta solo con fechas.
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        future = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
+
+        if season:
+            # Intentar con season + rango de fechas
+            params = {
+                "league": league_id,
+                "season": season,
+                "from": today,
+                "to": future,
+            }
+            results = await self._get("fixtures", params)
+            if results:
+                return results[:next_n]
+
+        # Fallback: solo con league + rango de fechas (sin season)
+        params = {
+            "league": league_id,
+            "from": today,
+            "to": future,
+        }
+        results = await self._get("fixtures", params)
+        if results:
+            return results[:next_n]
+
+        # Último intento: league + next (sin season)
         params = {"league": league_id, "next": next_n}
         results = await self._get("fixtures", params)
         return results or []
