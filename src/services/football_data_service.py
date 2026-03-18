@@ -98,6 +98,8 @@ class FootballDataService:
             logger.warning(f"football-data.org: No se obtuvieron partidos para team_id={team_id}")
             return []
         matches = data.get("matches", [])
+        # Ordenar de más reciente a más antiguo para que forma y pesos sean correctos
+        matches.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
         logger.info(f"football-data.org: {len(matches)} partidos encontrados para team_id={team_id}")
         return matches
 
