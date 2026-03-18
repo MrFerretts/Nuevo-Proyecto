@@ -255,7 +255,7 @@ class FootballDataService:
 
         return {
             "form_score": form_score,
-            "form_detail": "".join(results[:5]),
+            "form_detail": "".join(results[:5][::-1]),
             "goals_scored_avg": sum(goals_scored) / n if n else 0,
             "goals_conceded_avg": sum(goals_conceded) / n if n else 0,
             "over25_pct": (over25_count / n * 100) if n else 0,
