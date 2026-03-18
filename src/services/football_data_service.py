@@ -243,17 +243,16 @@ class FootballDataService:
                 else:
                     results.append("L")
 
-        # Forma ponderada (más peso a partidos recientes)
-        weights = [1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.5, 0.5, 0.5, 0.5]
+        # Forma ponderada con decay exponencial (half_life=4 partidos)
+        import math
+        weights = [math.exp(-0.693 * i / 4) for i in range(len(results))]
         weighted_score = 0
-        total_weight = 0
+        total_weight = sum(weights)
         for i, r in enumerate(results):
-            w = weights[i] if i < len(weights) else 0.5
-            total_weight += w
             if r == "W":
-                weighted_score += 3 * w
+                weighted_score += 3 * weights[i]
             elif r == "D":
-                weighted_score += 1 * w
+                weighted_score += 1 * weights[i]
 
         form_score = (weighted_score / (total_weight * 3) * 100) if total_weight > 0 else 50
 

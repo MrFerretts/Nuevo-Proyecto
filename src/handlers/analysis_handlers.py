@@ -10,15 +10,17 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY
+from src.config import ADMIN_ID, FOOTBALL_API_KEY, FOOTBALL_DATA_API_KEY, ODDS_API_KEY, ANTHROPIC_API_KEY
 from src.services.stats_service import FootballStatsService, LEAGUE_IDS, LEAGUE_NAMES, LEAGUE_TO_ODDS_SPORT
 from src.services.football_data_service import FootballDataService, COMPETITION_MAP
 from src.services.odds_service import get_upcoming_games, get_match_odds
+from src.models.database import save_prediction
 from src.services.analysis_engine import (
     TeamAnalysis, analyze_form, analyze_goals, analyze_h2h,
     find_team_in_standings, estimate_probabilities, find_value_bets,
-    format_analysis_report,
+    format_analysis_report, calculate_league_averages_from_standings,
 )
+from src.services.ai_analysis_service import AIAnalysisService
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,16 @@ SELECT_LEAGUE, SELECT_MATCH = range(2)
 
 stats_service = None
 fd_service = None
+ai_service = None
+
+
+def get_ai_service() -> AIAnalysisService | None:
+    """Obtiene AIAnalysisService si hay API key configurada."""
+    global ai_service
+    if ai_service is None and ANTHROPIC_API_KEY:
+        ai_service = AIAnalysisService(ANTHROPIC_API_KEY)
+        logger.info("AI Analysis Service inicializado")
+    return ai_service
 
 
 def get_stats_service() -> FootballStatsService:
@@ -66,6 +78,41 @@ def get_fd_service():
 def can_use_fd(league_id: int) -> bool:
     """Verifica si football-data.org soporta esta liga en el plan gratuito."""
     return FOOTBALL_DATA_API_KEY and COMPETITION_MAP.get(league_id) is not None
+
+
+async def _save_analysis_prediction(
+    home_name: str, away_name: str, league_id: int,
+    match_date: str, probs: dict, suggestions: list,
+):
+    """Guarda la predicción principal para tracking de precisión."""
+    try:
+        league_name = LEAGUE_NAMES.get(league_id, "Desconocida")
+        match_name = f"{home_name} vs {away_name}"
+
+        # Guardar la mejor sugerencia (si hay)
+        suggestion_data = None
+        if suggestions:
+            s = suggestions[0]
+            suggestion_data = {
+                "market": s.market,
+                "pick": s.pick,
+                "odds": s.odds,
+                "edge": s.value,
+                "confidence": s.confidence,
+            }
+
+        pred_id = await save_prediction(
+            match_name=match_name,
+            league=league_name,
+            match_date=match_date[:10] if match_date else "",
+            home_team=home_name,
+            away_team=away_name,
+            probs=probs,
+            suggestion=suggestion_data,
+        )
+        logger.info(f"Predicción guardada: ID={pred_id} - {match_name}")
+    except Exception as e:
+        logger.warning(f"Error guardando predicción: {e}")
 
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,8 +391,9 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
         away_analysis.injuries = away_injuries
         away_analysis.injuries_count = len(away_injuries)
 
-    # Probabilidades (ahora con Poisson + ajustes)
-    probs = estimate_probabilities(home_analysis, away_analysis, h2h)
+    # Probabilidades (ahora con Poisson + ajustes + promedios dinámicos)
+    probs = estimate_probabilities(home_analysis, away_analysis, h2h,
+                                   league_id=league_id, standings=standings)
 
     # Cuotas del mercado (usando el sport_key correcto para la liga)
     odds = await _get_odds_for_match(league_id, fixture, home_name, away_name)
@@ -353,7 +401,23 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     # Value bets
     suggestions = find_value_bets(probs, odds)
 
-    return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+
+    # Guardar predicción para tracking
+    match_date = fixture.get("fixture", {}).get("date", "")
+    await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions)
+
+    # Análisis con IA (si está configurado)
+    ai = get_ai_service()
+    if ai:
+        league_name = LEAGUE_NAMES.get(league_id, "")
+        ai_text = await ai.generate_ai_analysis(
+            home_analysis, away_analysis, h2h, probs, suggestions, league_name
+        )
+        if ai_text:
+            report += f"\n\n{'═' * 28}\n\n{ai_text}"
+
+    return report
 
 
 async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
@@ -406,7 +470,8 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
         points=away_standing["points"],
     )
 
-    probs = estimate_probabilities(home_analysis, away_analysis, h2h)
+    probs = estimate_probabilities(home_analysis, away_analysis, h2h,
+                                   league_id=league_id)
 
     odds = _extract_embedded_odds(fixture, home_name, away_name)
     if not any(v > 0 for v in odds.values()):
@@ -414,7 +479,23 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
     suggestions = find_value_bets(probs, odds)
 
-    return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+
+    # Guardar predicción para tracking
+    match_date = fixture.get("fixture", {}).get("date", "")
+    await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions)
+
+    # Análisis con IA (si está configurado)
+    ai = get_ai_service()
+    if ai:
+        league_name = LEAGUE_NAMES.get(league_id, "")
+        ai_text = await ai.generate_ai_analysis(
+            home_analysis, away_analysis, h2h, probs, suggestions, league_name
+        )
+        if ai_text:
+            report += f"\n\n{'═' * 28}\n\n{ai_text}"
+
+    return report
 
 
 def _extract_embedded_odds(fixture: dict, home_name: str, away_name: str) -> dict:
@@ -598,7 +679,9 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
                         points=away_standing["points"],
                     )
 
-                probs = estimate_probabilities(home_analysis, away_analysis, h2h)
+                probs = estimate_probabilities(home_analysis, away_analysis, h2h,
+                                               league_id=league_id,
+                                               standings=standings_fd if use_fd else None)
                 odds = await _get_odds_for_match(league_id, fixture, home_info.get("name", ""), away_info.get("name", ""))
                 suggestions = find_value_bets(probs, odds)
 
@@ -656,6 +739,13 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
         "📌 Usa /analizar para ver el análisis completo de un partido específico.",
         "📌 Usa /newtip para publicar una de estas oportunidades como tip.",
     ])
+
+    # Resumen IA de oportunidades
+    ai = get_ai_service()
+    if ai and all_suggestions:
+        ai_summary = await ai.generate_ai_tips_summary(all_suggestions[:8])
+        if ai_summary:
+            lines.extend(["", f"{'═' * 28}", "", ai_summary])
 
     text = "\n".join(lines)
     if len(text) > 4096:

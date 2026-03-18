@@ -22,6 +22,7 @@ from src.handlers.admin_handlers import (
     tip_odds, tip_stake, tip_confidence, tip_vip_choice,
     cancel_tip, set_result, add_vip_user, remove_vip_user,
     broadcast, admin_panel,
+    resolve_prediction_command, precision_command, pending_predictions_command,
     SPORT, MATCH, PREDICTION, ODDS, STAKE, CONFIDENCE, VIP_CHOICE,
 )
 from src.handlers.analysis_handlers import (
@@ -88,6 +89,9 @@ def main():
     app.add_handler(CommandHandler("addvip", add_vip_user))
     app.add_handler(CommandHandler("removevip", remove_vip_user))
     app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("resolver", resolve_prediction_command))
+    app.add_handler(CommandHandler("precision", precision_command))
+    app.add_handler(CommandHandler("pendientes", pending_predictions_command))
     app.add_handler(CommandHandler("admin", admin_panel))
 
     # Callback queries (botones inline)

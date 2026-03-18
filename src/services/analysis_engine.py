@@ -8,8 +8,11 @@ Incluye modelo de Poisson para estimación de goles y resultados exactos.
 """
 
 import math
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,6 +83,82 @@ class BetSuggestion:
     confidence: str       # baja, media, alta, muy_alta
     stake: int            # 1-5 recomendado
     reasoning: list       # Lista de razones
+
+
+# ══════════════════════════════════════════════════════════════════
+# PROMEDIOS DE LIGA DINÁMICOS
+# ══════════════════════════════════════════════════════════════════
+
+# Promedios históricos por liga (goles por partido: local, visitante)
+# Fuente: promedios reales de las últimas 5 temporadas
+LEAGUE_AVERAGES = {
+    # Liga ID → (avg_home_goals, avg_away_goals)
+    39:  (1.55, 1.18),  # Premier League (alta)
+    140: (1.40, 1.08),  # La Liga (más táctica)
+    135: (1.38, 1.05),  # Serie A (defensiva)
+    78:  (1.65, 1.30),  # Bundesliga (más goles)
+    61:  (1.42, 1.05),  # Ligue 1
+    2:   (1.50, 1.15),  # Champions League
+    3:   (1.40, 1.10),  # Europa League
+    262: (1.35, 1.00),  # Liga MX
+    253: (1.48, 1.20),  # MLS
+    13:  (1.38, 1.05),  # Copa Libertadores
+}
+
+# Valor por defecto si la liga no está mapeada
+DEFAULT_LEAGUE_AVG = (1.45, 1.15)
+
+
+def get_league_averages(league_id: int = 0) -> tuple[float, float]:
+    """Obtiene promedios de goles por liga. Usa datos estáticos como base."""
+    return LEAGUE_AVERAGES.get(league_id, DEFAULT_LEAGUE_AVG)
+
+
+def calculate_league_averages_from_standings(standings: list) -> tuple[float, float]:
+    """Calcula promedios reales de la liga desde la tabla de clasificación.
+
+    Si hay datos suficientes en los standings (goles/partidos), calcula
+    el promedio real. Si no, retorna None para usar el estático.
+    """
+    if not standings or len(standings) < 4:
+        return None, None
+
+    total_home_goals = 0
+    total_away_goals = 0
+    total_matches = 0
+
+    for entry in standings:
+        played = entry.get("playedGames", 0) or entry.get("played", 0)
+        goals_for = entry.get("goalsFor", 0)
+        goals_against = entry.get("goalsAgainst", 0)
+
+        # football-data.org tiene home/away splits en standings
+        home_data = entry.get("home", {})
+        away_data = entry.get("away", {})
+
+        if home_data and home_data.get("goalsFor") is not None:
+            total_home_goals += home_data.get("goalsFor", 0)
+            total_away_goals += away_data.get("goalsFor", 0)
+            home_played = home_data.get("playedGames", 0) or home_data.get("played", 0)
+            total_matches += home_played
+        elif played > 0 and goals_for > 0:
+            # Sin splits, estimar: ~55% de goles se meten en casa
+            total_home_goals += goals_for * 0.55
+            total_away_goals += goals_for * 0.45
+            total_matches += played // 2
+
+    if total_matches < 20:
+        return None, None
+
+    avg_home = total_home_goals / total_matches
+    avg_away = total_away_goals / total_matches
+
+    # Sanity check
+    avg_home = max(0.8, min(2.5, avg_home))
+    avg_away = max(0.5, min(2.0, avg_away))
+
+    logger.info(f"Promedios dinámicos calculados: home={avg_home:.2f}, away={avg_away:.2f} (de {total_matches} partidos)")
+    return avg_home, avg_away
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -158,8 +237,20 @@ def poisson_match_probs(home_xg: float, away_xg: float, max_goals: int = 7) -> d
 # FUNCIONES DE ANÁLISIS LEGACY (para API-Football fallback)
 # ══════════════════════════════════════════════════════════════════
 
+def _exponential_decay_weights(n: int, half_life: int = 4) -> list[float]:
+    """Genera pesos con decay exponencial.
+
+    half_life: después de cuántos partidos el peso se reduce a la mitad.
+    Partido 0 (más reciente) = peso 1.0, partido half_life = peso 0.5, etc.
+    """
+    return [math.exp(-0.693 * i / half_life) for i in range(n)]
+
+
 def analyze_form(fixtures: list, team_id: int) -> tuple[float, str]:
-    """Analiza la forma reciente de un equipo.
+    """Analiza la forma reciente de un equipo con decay exponencial.
+
+    Los partidos más recientes pesan exponencialmente más.
+    half_life=4: el partido de hace 4 jornadas pesa la mitad del último.
 
     Returns: (score 0-100, detail string like "WWDLW")
     """
@@ -167,8 +258,6 @@ def analyze_form(fixtures: list, team_id: int) -> tuple[float, str]:
         return 50.0, "?"
 
     results = []
-    points = 0
-    max_points = 0
 
     for fx in fixtures[:10]:  # Últimos 10 partidos
         teams = fx.get("teams", {})
@@ -178,37 +267,31 @@ def analyze_form(fixtures: list, team_id: int) -> tuple[float, str]:
         home_goals = goals.get("home", 0) or 0
         away_goals = goals.get("away", 0) or 0
 
-        max_points += 3
         if is_home:
             if home_goals > away_goals:
                 results.append("W")
-                points += 3
             elif home_goals == away_goals:
                 results.append("D")
-                points += 1
             else:
                 results.append("L")
         else:
             if away_goals > home_goals:
                 results.append("W")
-                points += 3
             elif away_goals == home_goals:
                 results.append("D")
-                points += 1
             else:
                 results.append("L")
 
-    # Dar más peso a partidos recientes
+    # Decay exponencial: últimos partidos pesan MUCHO más
+    weights = _exponential_decay_weights(len(results), half_life=4)
     weighted_score = 0
-    weights = [1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7, 0.6]
-    total_weight = 0
+    total_weight = sum(weights)
+
     for i, r in enumerate(results):
-        w = weights[i] if i < len(weights) else 0.5
-        total_weight += w
         if r == "W":
-            weighted_score += 3 * w
+            weighted_score += 3 * weights[i]
         elif r == "D":
-            weighted_score += 1 * w
+            weighted_score += 1 * weights[i]
 
     score = (weighted_score / (total_weight * 3) * 100) if total_weight > 0 else 50
     detail = "".join(results[:5])  # Mostrar últimos 5
@@ -383,16 +466,31 @@ def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
 # ESTIMACIÓN DE PROBABILIDADES (modelo mejorado)
 # ══════════════════════════════════════════════════════════════════
 
-def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict) -> dict:
+def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
+                           league_id: int = 0, standings: list = None) -> dict:
     """Estima probabilidades combinando Poisson con ajustes contextuales.
 
-    1. Calcula xG con fuerza de ataque/defensa
+    1. Calcula xG con fuerza de ataque/defensa y promedios de liga reales
     2. Genera probabilidades base con Poisson
     3. Ajusta con forma reciente, posición y H2H
     4. Normaliza y devuelve probabilidades finales
     """
-    # Paso 1: Calcular goles esperados
-    home_xg, away_xg = calculate_expected_goals(home, away, h2h)
+    # Paso 1: Obtener promedios de liga (dinámicos si hay standings, sino estáticos)
+    avg_home, avg_away = DEFAULT_LEAGUE_AVG
+    if standings:
+        dyn_home, dyn_away = calculate_league_averages_from_standings(standings)
+        if dyn_home is not None:
+            avg_home, avg_away = dyn_home, dyn_away
+            logger.info(f"Usando promedios DINÁMICOS: home={avg_home:.2f}, away={avg_away:.2f}")
+        else:
+            avg_home, avg_away = get_league_averages(league_id)
+            logger.info(f"Usando promedios ESTÁTICOS para liga {league_id}: home={avg_home:.2f}, away={avg_away:.2f}")
+    elif league_id:
+        avg_home, avg_away = get_league_averages(league_id)
+        logger.info(f"Usando promedios ESTÁTICOS para liga {league_id}: home={avg_home:.2f}, away={avg_away:.2f}")
+
+    # Paso 2: Calcular goles esperados con promedios de liga correctos
+    home_xg, away_xg = calculate_expected_goals(home, away, h2h, avg_home, avg_away)
 
     # Paso 2: Probabilidades Poisson (base)
     poisson = poisson_match_probs(home_xg, away_xg)

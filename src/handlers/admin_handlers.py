@@ -8,6 +8,7 @@ from src.models.database import (
     add_tip, update_tip_result, get_pending_tips, get_stats,
     set_vip, remove_vip, get_all_users, get_vip_users,
     add_payment, get_total_revenue,
+    get_pending_predictions, resolve_prediction, get_prediction_accuracy,
 )
 from src.utils.formatters import format_tip, format_stats
 
@@ -348,9 +349,150 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/oportunidades - Escanear ligas por value bets\n"
         "/newtip - Crear nuevo tip\n"
         "/resultado - Actualizar resultado\n"
+        "/resolver `<id> <home_goals>-<away_goals>` - Resolver predicción\n"
+        "/precision - Ver precisión del modelo\n"
+        "/pendientes - Predicciones sin resolver\n"
         "/addvip - Añadir VIP\n"
         "/removevip - Quitar VIP\n"
         "/broadcast - Mensaje masivo\n"
         "/admin - Este panel\n"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+@admin_only
+async def resolve_prediction_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resuelve una predicción con el resultado real.
+
+    Uso: /resolver <id> <goles_local>-<goles_visitante>
+    Ejemplo: /resolver 5 2-1
+    """
+    args = context.args
+    if not args or len(args) < 2:
+        # Mostrar predicciones pendientes
+        pending = await get_pending_predictions(10)
+        if not pending:
+            await update.message.reply_text("No hay predicciones pendientes de resolver.")
+            return
+
+        lines = ["📋 *PREDICCIONES PENDIENTES*\n"]
+        for p in pending:
+            lines.append(
+                f"ID `{p['id']}`: {p['match_name']}\n"
+                f"   📅 {p['match_date'] or '?'} | {p['league']}\n"
+                f"   🎯 {p['predicted_pick'] or 'Sin pick'} @ {p['predicted_odds']:.2f}\n"
+            )
+        lines.append("\nUso: /resolver `<id>` `<local>-<visitante>`\nEjemplo: /resolver 5 2-1")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    try:
+        pred_id = int(args[0])
+        score_parts = args[1].split("-")
+        home_goals = int(score_parts[0])
+        away_goals = int(score_parts[1])
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "❌ Formato inválido.\nUso: /resolver `<id>` `<local>-<visitante>`\nEjemplo: /resolver 5 2-1",
+            parse_mode="Markdown",
+        )
+        return
+
+    await resolve_prediction(pred_id, home_goals, away_goals)
+    await update.message.reply_text(
+        f"Predicción #{pred_id} resuelta: {home_goals}-{away_goals}"
+    )
+
+
+@admin_only
+async def precision_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra métricas de precisión del modelo.
+
+    Uso: /precision [días]
+    """
+    days = 30
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            pass
+
+    accuracy = await get_prediction_accuracy(days)
+
+    if accuracy["total"] == 0:
+        await update.message.reply_text(
+            "📊 No hay predicciones resueltas aún.\n\n"
+            "Las predicciones se guardan automáticamente al usar /analizar.\n"
+            "Usa /resolver para registrar resultados reales."
+        )
+        return
+
+    lines = [
+        f"📊 *PRECISIÓN DEL MODELO* (últimos {days} días)\n",
+        f"{'═' * 28}",
+        "",
+        f"🎯 Predicciones resueltas: *{accuracy['resolved']}*",
+        f"⏳ Pendientes: *{accuracy.get('pending', 0)}*",
+        f"✅ Aciertos: *{accuracy['correct']}* / {accuracy['resolved']}",
+        f"📈 Accuracy: *{accuracy['accuracy']:.1%}*",
+        f"💰 Profit (unidades): *{accuracy['profit']:+.2f}*",
+        f"📊 ROI: *{accuracy['roi']:+.1f}%*",
+    ]
+
+    # Por confianza
+    if accuracy["by_confidence"]:
+        lines.extend(["", "📊 *POR CONFIANZA:*"])
+        for conf, data in sorted(accuracy["by_confidence"].items()):
+            if data["total"] > 0:
+                emoji = {"baja": "🟡", "media": "🟠", "alta": "🔴", "muy_alta": "💎"}.get(conf, "⚪")
+                lines.append(
+                    f"{emoji} {conf}: {data['correct']}/{data['total']} "
+                    f"({data['accuracy']:.0%}) | P/L: {data['profit']:+.2f}"
+                )
+
+    # Por mercado
+    if accuracy["by_market"]:
+        lines.extend(["", "📊 *POR MERCADO:*"])
+        for market, data in sorted(accuracy["by_market"].items(), key=lambda x: x[1]["total"], reverse=True):
+            if data["total"] > 0 and market:
+                lines.append(
+                    f"  {market}: {data['correct']}/{data['total']} "
+                    f"({data['accuracy']:.0%}) | P/L: {data['profit']:+.2f}"
+                )
+
+    # Calibración
+    if accuracy["calibration"]:
+        lines.extend(["", "📊 *CALIBRACIÓN (predicho vs real):*"])
+        for bucket, data in sorted(accuracy["calibration"].items()):
+            diff = data["actual"] - data["predicted"]
+            emoji = "✅" if abs(diff) < 0.1 else "⚠️"
+            lines.append(
+                f"  {emoji} {bucket}: predicho {data['predicted']:.0%} → real {data['actual']:.0%} "
+                f"(n={data['count']})"
+            )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@admin_only
+async def pending_predictions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra predicciones pendientes de resolver."""
+    pending = await get_pending_predictions(20)
+
+    if not pending:
+        await update.message.reply_text("No hay predicciones pendientes de resolver.")
+        return
+
+    lines = ["📋 *PREDICCIONES PENDIENTES*\n"]
+    for p in pending:
+        pick_text = f" → {p['predicted_pick']} @ {p['predicted_odds']:.2f}" if p["predicted_pick"] else ""
+        lines.append(
+            f"ID `{p['id']}`: *{p['match_name']}*\n"
+            f"   📅 {p['match_date'] or '?'} | {p['league']}{pick_text}\n"
+        )
+
+    lines.append("\nUsa: /resolver `<id>` `<local>-<visitante>`")
+    text = "\n".join(lines)
+    if len(text) > 4096:
+        text = text[:4090] + "..."
     await update.message.reply_text(text, parse_mode="Markdown")
