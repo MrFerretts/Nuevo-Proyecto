@@ -41,7 +41,6 @@ class TeamAnalysis:
     over15_pct: float = 0.0              # % partidos con +1.5 goles
     over35_pct: float = 0.0              # % partidos con +3.5 goles
     injuries: list = field(default_factory=list)  # Lista de lesionados
-    rest_days: int = -1                  # Días de descanso antes del partido (-1 = desconocido)
 
 
 @dataclass
@@ -373,16 +372,6 @@ def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         away_visit_factor = away.away_goals_scored_avg / max(away.goals_scored_avg, 0.1)
         away_xg *= (0.7 + 0.3 * away_visit_factor)
 
-    # Ajuste por días de descanso
-    if home.rest_days >= 0 and away.rest_days >= 0:
-        rest_diff = home.rest_days - away.rest_days
-        if rest_diff >= 3:  # Local tiene mucho más descanso
-            home_xg *= 1.05
-            away_xg *= 0.97
-        elif rest_diff <= -3:  # Visitante tiene mucho más descanso
-            home_xg *= 0.97
-            away_xg *= 1.05
-
     # Clamp a valores razonables
     home_xg = max(0.3, min(4.5, home_xg))
     away_xg = max(0.2, min(4.0, away_xg))
@@ -669,14 +658,6 @@ def format_analysis_report(
         if away.injuries:
             injured_names = ", ".join(away.injuries[:5])
             lines.append(f"✈️ {away.name}: {injured_names}")
-
-    # Días de descanso
-    if home.rest_days >= 0 and away.rest_days >= 0:
-        lines.extend([
-            "",
-            f"😴 *DESCANSO*",
-            f"🏠 {home.name}: {home.rest_days} días | ✈️ {away.name}: {away.rest_days} días",
-        ])
 
     lines.extend([
         "",

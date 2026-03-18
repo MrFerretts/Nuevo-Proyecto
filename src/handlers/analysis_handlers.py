@@ -248,7 +248,6 @@ def _build_team_analysis(name: str, stats: dict, standing: dict) -> TeamAnalysis
         over35_pct=stats.get("over35_pct", 0),
         home_win_pct=stats.get("home_win_pct", 0),
         away_win_pct=stats.get("away_win_pct", 0),
-        rest_days=stats.get("rest_days", -1),
     )
 
 

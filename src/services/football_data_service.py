@@ -269,18 +269,6 @@ class FootballDataService:
                 else:
                     break
 
-        # Días de descanso (desde el partido más reciente)
-        rest_days = -1
-        if matches:
-            last_match_date = matches[0].get("utcDate", "")
-            if last_match_date:
-                try:
-                    last_dt = datetime.fromisoformat(last_match_date.replace("Z", "+00:00"))
-                    now = datetime.now(last_dt.tzinfo)
-                    rest_days = (now - last_dt).days
-                except (ValueError, TypeError):
-                    pass
-
         return {
             "form_score": form_score,
             "form_detail": "".join(results[:5][::-1]),
@@ -309,7 +297,6 @@ class FootballDataService:
             "away_goals_conceded_avg": sum(away_goals_conceded) / away_matches if away_matches else 0,
             "home_matches": home_matches,
             "away_matches": away_matches,
-            "rest_days": rest_days,
         }
 
     def calc_h2h_stats(self, matches: list, home_team_id: int) -> dict:
@@ -398,5 +385,5 @@ class FootballDataService:
             "streak": "?", "goals_scored_total": 0, "goals_conceded_total": 0,
             "home_goals_scored_avg": 0, "home_goals_conceded_avg": 0,
             "away_goals_scored_avg": 0, "away_goals_conceded_avg": 0,
-            "home_matches": 0, "away_matches": 0, "rest_days": -1,
+            "home_matches": 0, "away_matches": 0,
         }
