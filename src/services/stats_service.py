@@ -76,9 +76,10 @@ class FootballStatsService:
         results = await self._get("predictions", params)
         return results[0] if results else None
 
-    async def get_upcoming_fixtures(self, league_id: int, season: int, next_n: int = 10) -> list:
+    async def get_upcoming_fixtures(self, league_id: int, season: int = None, next_n: int = 10) -> list:
         """Próximos partidos de una liga."""
-        params = {"league": league_id, "season": season, "next": next_n}
+        # El parámetro 'next' no es compatible con 'season' en API-Football
+        params = {"league": league_id, "next": next_n}
         results = await self._get("fixtures", params)
         return results or []
 
