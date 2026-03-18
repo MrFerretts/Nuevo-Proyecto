@@ -408,10 +408,29 @@ def format_analysis_report(
     suggestions: list[BetSuggestion],
 ) -> str:
     """Genera un reporte completo de análisis formateado para Telegram."""
+    # Detectar si los datos están vacíos (API falló)
+    data_missing = (home.form_detail == "?" and away.form_detail == "?" and
+                    home.goals_scored_avg == 0 and away.goals_scored_avg == 0)
+
     lines = [
         f"🔬 *ANÁLISIS COMPLETO*",
         f"🏟 *{home.name} vs {away.name}*",
         "",
+    ]
+
+    if data_missing:
+        lines.extend([
+            "⚠️ *ATENCIÓN: No se pudieron obtener estadísticas reales.*",
+            "Posibles causas:",
+            "• API key no configurada o inválida",
+            "• Rate limit excedido (10 req/min)",
+            "• Liga no disponible en plan gratuito",
+            "",
+            "Revisa los logs de Railway para más detalles.",
+            "",
+        ])
+
+    lines.extend([
         f"{'═' * 28}",
         "",
         f"📊 *FORMA RECIENTE*",

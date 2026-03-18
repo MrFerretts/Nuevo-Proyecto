@@ -55,19 +55,36 @@ class FootballDataService:
 
     async def _get(self, endpoint: str, params: dict = None):
         """Hace un GET a football-data.org."""
-        async with aiohttp.ClientSession() as session:
-            url = f"{API_BASE}/{endpoint}"
-            logger.info(f"football-data.org: GET {url} params={params}")
-            async with session.get(url, headers=self.headers, params=params or {}) as resp:
-                if resp.status == 429:
-                    logger.warning("football-data.org: Rate limit alcanzado (10 req/min)")
-                    return None
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error(f"football-data.org: {resp.status} - {text[:200]}")
-                    return None
-                data = await resp.json()
-                return data
+        if not self.api_key:
+            logger.error("football-data.org: API KEY NO CONFIGURADA - todas las llamadas fallarán")
+            return None
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{API_BASE}/{endpoint}"
+                logger.info(f"football-data.org: GET {url} params={params}")
+                async with session.get(url, headers=self.headers, params=params or {}) as resp:
+                    if resp.status == 429:
+                        logger.warning("football-data.org: Rate limit alcanzado (10 req/min)")
+                        return None
+                    if resp.status == 401:
+                        logger.error("football-data.org: API KEY INVÁLIDA (401 Unauthorized)")
+                        return None
+                    if resp.status == 403:
+                        logger.error(f"football-data.org: Acceso denegado (403) para {endpoint} - puede que esta liga no esté en el plan gratuito")
+                        return None
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.error(f"football-data.org: {resp.status} - {text[:200]}")
+                        return None
+                    data = await resp.json()
+                    logger.info(f"football-data.org: OK {endpoint} - keys={list(data.keys()) if isinstance(data, dict) else 'list'}")
+                    return data
+        except aiohttp.ClientError as e:
+            logger.error(f"football-data.org: Error de conexión - {e}")
+            return None
+        except Exception as e:
+            logger.error(f"football-data.org: Error inesperado - {e}")
+            return None
 
     # ── Partidos de una competición ─────────────────────────────────
 
@@ -78,17 +95,23 @@ class FootballDataService:
             {"status": "FINISHED", "limit": limit},
         )
         if not data:
+            logger.warning(f"football-data.org: No se obtuvieron partidos para team_id={team_id}")
             return []
-        return data.get("matches", [])
+        matches = data.get("matches", [])
+        logger.info(f"football-data.org: {len(matches)} partidos encontrados para team_id={team_id}")
+        return matches
 
-    async def get_head_to_head(self, match_id: int, limit: int = 10) -> list:
-        """Historial H2H de un partido específico."""
+    async def get_head_to_head(self, match_id: int, limit: int = 10) -> tuple:
+        """Historial H2H de un partido específico.
+
+        Returns: (aggregates dict, matches list)
+        """
         data = await self._get(
             f"matches/{match_id}/head2head",
             {"limit": limit},
         )
         if not data:
-            return []
+            return {}, []
         return data.get("aggregates", {}), data.get("matches", [])
 
     async def get_standings(self, competition_code: str) -> list:

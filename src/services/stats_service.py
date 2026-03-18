@@ -24,25 +24,38 @@ class FootballStatsService:
         }
 
     async def _get(self, endpoint: str, params: dict) -> Optional[list]:
-        async with aiohttp.ClientSession() as session:
-            url = f"{API_BASE}/{endpoint}"
-            logger.info(f"API Request: {url} params={params}")
-            async with session.get(
-                url,
-                headers=self.headers,
-                params=params,
-            ) as resp:
-                if resp.status != 200:
-                    logger.error(f"API Error: status={resp.status} for {endpoint}")
-                    return None
-                data = await resp.json()
-                errors = data.get("errors", {})
-                if errors:
-                    logger.error(f"API Errors: {errors} for {endpoint} params={params}")
-                    return None  # No devolver datos vacíos si hay error de API
-                results = data.get("response", [])
-                logger.info(f"API Response: {endpoint} returned {len(results) if isinstance(results, list) else 'dict'} results")
-                return results
+        if not self.api_key:
+            logger.error("API-Football: API KEY NO CONFIGURADA (FOOTBALL_API_KEY)")
+            return None
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{API_BASE}/{endpoint}"
+                logger.info(f"API-Football: GET {url} params={params}")
+                async with session.get(
+                    url,
+                    headers=self.headers,
+                    params=params,
+                ) as resp:
+                    if resp.status == 401:
+                        logger.error(f"API-Football: API KEY INVÁLIDA (401) para {endpoint}")
+                        return None
+                    if resp.status != 200:
+                        logger.error(f"API-Football: Error status={resp.status} para {endpoint}")
+                        return None
+                    data = await resp.json()
+                    errors = data.get("errors", {})
+                    if errors:
+                        logger.error(f"API-Football: Errors={errors} para {endpoint} params={params}")
+                        return None
+                    results = data.get("response", [])
+                    logger.info(f"API-Football: {endpoint} devolvió {len(results) if isinstance(results, list) else 'dict'} resultados")
+                    return results
+        except aiohttp.ClientError as e:
+            logger.error(f"API-Football: Error de conexión - {e}")
+            return None
+        except Exception as e:
+            logger.error(f"API-Football: Error inesperado - {e}")
+            return None
 
     async def get_team_id(self, team_name: str, country: str = "") -> Optional[int]:
         """Busca el ID de un equipo por nombre."""

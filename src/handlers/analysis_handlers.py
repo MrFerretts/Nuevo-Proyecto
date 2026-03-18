@@ -23,6 +23,12 @@ from src.services.analysis_engine import (
 logger = logging.getLogger(__name__)
 
 
+def _get_current_season() -> int:
+    """Calcula la temporada actual de fútbol."""
+    now = datetime.now()
+    return now.year - 1 if now.month <= 6 else now.year
+
+
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID:
@@ -50,7 +56,10 @@ def get_fd_service():
     """Obtiene FootballDataService si hay API key configurada."""
     global fd_service
     if fd_service is None and FOOTBALL_DATA_API_KEY:
+        logger.info(f"Inicializando FootballDataService (key length={len(FOOTBALL_DATA_API_KEY)}, starts={FOOTBALL_DATA_API_KEY[:4]}...)")
         fd_service = FootballDataService(FOOTBALL_DATA_API_KEY)
+    elif not FOOTBALL_DATA_API_KEY:
+        logger.warning("FOOTBALL_DATA_API_KEY no está configurada - football-data.org no disponible")
     return fd_service
 
 
@@ -195,6 +204,7 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report = await run_fd_analysis(fixture, league_id)
         else:
             report = await run_full_analysis(fixture, league_id, season)
+        logger.info(f"Análisis completado: {len(report)} chars")
         # Telegram limita mensajes a 4096 chars
         if len(report) > 4096:
             parts = [report[i:i+4096] for i in range(0, len(report), 4096)]
@@ -222,17 +232,31 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     home_name = home_info.get("name", "Local")
     away_name = away_info.get("name", "Visitante")
 
+    logger.info(f"run_fd_analysis: {home_name} (id={home_id}) vs {away_name} (id={away_id}), comp={comp_code}")
+
     # Obtener datos desde football-data.org
     home_matches = await fd.get_team_matches(home_id, limit=15) if home_id else []
     away_matches = await fd.get_team_matches(away_id, limit=15) if away_id else []
     standings = await fd.get_standings(comp_code)
+
+    logger.info(f"run_fd_analysis: home_matches={len(home_matches)}, away_matches={len(away_matches)}, standings={len(standings)}")
+
+    # Si no hay datos de partidos, intentar fallback con API-Football
+    if not home_matches and not away_matches:
+        logger.warning(f"football-data.org no devolvió partidos. Intentando fallback con API-Football...")
+        if FOOTBALL_API_KEY:
+            return await run_full_analysis(fixture, league_id, _get_current_season())
 
     # H2H: usar match_id si disponible
     h2h_data = {}
     h2h_matches = []
     fd_match_id = fixture.get("_fd_match_id")
     if fd_match_id:
-        h2h_data, h2h_matches = await fd.get_head_to_head(fd_match_id, limit=10)
+        result = await fd.get_head_to_head(fd_match_id, limit=10)
+        if isinstance(result, tuple) and len(result) == 2:
+            h2h_data, h2h_matches = result
+        else:
+            logger.warning(f"H2H devolvió resultado inesperado: {type(result)}")
 
     # Calcular estadísticas con el servicio de football-data.org
     home_stats = fd.calc_team_stats(home_matches, home_id)
