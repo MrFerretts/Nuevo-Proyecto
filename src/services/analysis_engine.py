@@ -444,7 +444,7 @@ def format_analysis_report(
         f"📈 *TENDENCIAS*",
         f"🏠 {home.name}: Over 2.5 en {home.over25_pct:.0f}% | BTTS {home.btts_pct:.0f}% | CS {home.clean_sheets_pct:.0f}%",
         f"✈️ {away.name}: Over 2.5 en {away.over25_pct:.0f}% | BTTS {away.btts_pct:.0f}% | CS {away.clean_sheets_pct:.0f}%",
-    ]
+    ])
 
     if home.league_position > 0:
         lines.extend([
