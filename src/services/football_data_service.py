@@ -196,6 +196,12 @@ class FootballDataService:
             team_scored = home_goals if is_home else away_goals
             team_conceded = away_goals if is_home else home_goals
 
+            home_team_name = m.get("homeTeam", {}).get("name", "?")
+            away_team_name = m.get("awayTeam", {}).get("name", "?")
+            match_date = m.get("utcDate", "?")[:10]
+            result_str = "W" if team_scored > team_conceded else ("D" if team_scored == team_conceded else "L")
+            logger.info(f"  [{match_date}] {home_team_name} {home_goals}-{away_goals} {away_team_name} | team_id={team_id} is_home={is_home} -> {result_str}")
+
             goals_scored.append(team_scored)
             goals_conceded.append(team_conceded)
 
