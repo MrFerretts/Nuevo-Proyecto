@@ -75,12 +75,15 @@ class FootballStatsService:
         return results or []
 
     async def get_standings(self, league_id: int, season: int) -> list:
-        """Clasificación de una liga."""
-        params = {"league": league_id, "season": season}
-        results = await self._get("standings", params)
-        if results and len(results) > 0:
-            standings = results[0].get("league", {}).get("standings", [])
-            return standings[0] if standings else []
+        """Clasificación de una liga. Intenta season actual, luego fallback a 2024."""
+        for s in [season, 2024, 2023]:
+            params = {"league": league_id, "season": s}
+            results = await self._get("standings", params)
+            if results and len(results) > 0:
+                standings = results[0].get("league", {}).get("standings", [])
+                if standings:
+                    logger.info(f"Standings found for league {league_id} season {s}")
+                    return standings[0]
         return []
 
     async def get_fixture_predictions(self, fixture_id: int) -> Optional[dict]:
@@ -89,41 +92,52 @@ class FootballStatsService:
         results = await self._get("predictions", params)
         return results[0] if results else None
 
-    async def get_upcoming_fixtures(self, league_id: int, season: int = None, next_n: int = 10) -> list:
-        """Próximos partidos de una liga.
+    async def get_upcoming_fixtures(self, league_id: int, season: int = None, next_n: int = 10, odds_api_key: str = "") -> list:
+        """Próximos partidos de una liga usando The Odds API.
 
-        Usa rango de fechas (hoy + 14 días) con season para máxima compatibilidad.
-        Si no encuentra con season, intenta solo con fechas.
+        El plan gratuito de API-Football no permite acceder a temporadas actuales,
+        así que usamos The Odds API para obtener los próximos partidos y los
+        transformamos al formato esperado por el resto del código.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        future = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
+        from src.services.odds_service import get_upcoming_games
 
-        if season:
-            # Intentar con season + rango de fechas
-            params = {
-                "league": league_id,
-                "season": season,
-                "from": today,
-                "to": future,
+        sport_key = LEAGUE_TO_ODDS_SPORT.get(league_id)
+        if not sport_key:
+            logger.warning(f"No Odds API sport_key mapping for league_id={league_id}")
+            return []
+
+        logger.info(f"Fetching upcoming fixtures from Odds API: sport_key={sport_key}")
+        games = await get_upcoming_games(sport_key, limit=next_n)
+
+        if not games:
+            logger.warning(f"No games returned from Odds API for {sport_key}")
+            return []
+
+        # Transformar formato Odds API → formato API-Football para compatibilidad
+        fixtures = []
+        for game in games:
+            home_name = game.get("home_team", "?")
+            away_name = game.get("away_team", "?")
+
+            # Buscar team IDs en API-Football (el endpoint de búsqueda sí funciona en plan free)
+            home_id = await self.get_team_id(home_name)
+            away_id = await self.get_team_id(away_name)
+
+            fixture = {
+                "fixture": {
+                    "id": game.get("id", ""),
+                    "date": game.get("commence_time", ""),
+                },
+                "teams": {
+                    "home": {"id": home_id, "name": home_name},
+                    "away": {"id": away_id, "name": away_name},
+                },
+                "_odds_data": game.get("bookmakers", []),
             }
-            results = await self._get("fixtures", params)
-            if results:
-                return results[:next_n]
+            fixtures.append(fixture)
 
-        # Fallback: solo con league + rango de fechas (sin season)
-        params = {
-            "league": league_id,
-            "from": today,
-            "to": future,
-        }
-        results = await self._get("fixtures", params)
-        if results:
-            return results[:next_n]
-
-        # Último intento: league + next (sin season)
-        params = {"league": league_id, "next": next_n}
-        results = await self._get("fixtures", params)
-        return results or []
+        logger.info(f"Transformed {len(fixtures)} fixtures from Odds API for league {league_id}")
+        return fixtures
 
     async def get_injuries(self, team_id: int) -> list:
         """Lesiones actuales de un equipo."""
@@ -157,4 +171,18 @@ LEAGUE_NAMES = {
     262: "Liga MX",
     253: "MLS",
     13: "Copa Libertadores",
+}
+
+# Mapeo de league_id (API-Football) a sport_key (The Odds API)
+LEAGUE_TO_ODDS_SPORT = {
+    39: "soccer_epl",
+    140: "soccer_spain_la_liga",
+    135: "soccer_italy_serie_a",
+    78: "soccer_germany_bundesliga",
+    61: "soccer_france_ligue_one",
+    2: "soccer_uefa_champions_league",
+    3: "soccer_uefa_europa_league",
+    262: "soccer_mexico_ligamx",
+    253: "soccer_usa_mls",
+    13: "soccer_conmebol_copa_libertadores",
 }

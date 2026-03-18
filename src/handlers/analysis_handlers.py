@@ -154,10 +154,10 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     home_name = home_info.get("name", "Local")
     away_name = away_info.get("name", "Visitante")
 
-    # Recoger datos en paralelo (secuencial aquí por simplicidad y límites de API)
-    home_form_fixtures = await service.get_team_form(home_id, last=10)
-    away_form_fixtures = await service.get_team_form(away_id, last=10)
-    h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=10)
+    # Recoger datos (los endpoints con 'last' funcionan en plan gratuito)
+    home_form_fixtures = await service.get_team_form(home_id, last=10) if home_id else []
+    away_form_fixtures = await service.get_team_form(away_id, last=10) if away_id else []
+    h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=10) if (home_id and away_id) else []
     standings = await service.get_standings(league_id, season)
 
     # Analizar forma
@@ -205,14 +205,42 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     # Estimar probabilidades
     probs = estimate_probabilities(home_analysis, away_analysis, h2h)
 
-    # Obtener cuotas del mercado (The Odds API)
-    odds = await _get_market_odds(fixture, home_name, away_name)
+    # Obtener cuotas: primero de _odds_data embebido, luego buscar en The Odds API
+    odds = _extract_embedded_odds(fixture, home_name)
+    if not any(v > 0 for v in odds.values()):
+        odds = await _get_market_odds(fixture, home_name, away_name)
 
     # Encontrar value bets
     suggestions = find_value_bets(probs, odds)
 
     # Generar reporte
     return format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+
+
+def _extract_embedded_odds(fixture: dict, home_name: str) -> dict:
+    """Extrae cuotas del _odds_data embebido desde The Odds API."""
+    odds_result = {"home": 0, "draw": 0, "away": 0, "over25": 0, "under25": 0, "btts_yes": 0, "btts_no": 0}
+    bookmakers = fixture.get("_odds_data", [])
+    if not bookmakers:
+        return odds_result
+
+    for bk in bookmakers:
+        for market in bk.get("markets", []):
+            if market["key"] == "h2h":
+                for o in market.get("outcomes", []):
+                    if o["name"].lower() in home_name.lower() or home_name.lower() in o["name"].lower():
+                        odds_result["home"] = max(odds_result["home"], o["price"])
+                    elif o["name"] == "Draw":
+                        odds_result["draw"] = max(odds_result["draw"], o["price"])
+                    else:
+                        odds_result["away"] = max(odds_result["away"], o["price"])
+            elif market["key"] == "totals":
+                for o in market.get("outcomes", []):
+                    if o["name"] == "Over":
+                        odds_result["over25"] = max(odds_result["over25"], o["price"])
+                    elif o["name"] == "Under":
+                        odds_result["under25"] = max(odds_result["under25"], o["price"])
+    return odds_result
 
 
 async def _get_market_odds(fixture: dict, home_name: str, away_name: str) -> dict:
