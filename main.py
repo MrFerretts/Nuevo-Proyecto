@@ -1,0 +1,98 @@
+import asyncio
+import logging
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+from src.config import BOT_TOKEN, ADMIN_ID
+from src.models.database import init_db
+from src.handlers.user_handlers import (
+    start, help_command, stats_command, tips_command,
+    games_command, vip_info, button_callback,
+)
+from src.handlers.admin_handlers import (
+    new_tip, tip_sport, tip_match, tip_prediction,
+    tip_odds, tip_stake, tip_confidence, tip_vip_choice,
+    cancel_tip, set_result, add_vip_user, remove_vip_user,
+    broadcast, admin_panel,
+    SPORT, MATCH, PREDICTION, ODDS, STAKE, CONFIDENCE, VIP_CHOICE,
+)
+from src.services.scheduler_service import check_expired_vips
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+def main():
+    if not BOT_TOKEN:
+        print("❌ Error: BOT_TOKEN no configurado. Copia .env.example a .env y configúralo.")
+        return
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Conversation handler para crear tips
+    tip_conv = ConversationHandler(
+        entry_points=[CommandHandler("newtip", new_tip)],
+        states={
+            SPORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, tip_sport)],
+            MATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, tip_match)],
+            PREDICTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, tip_prediction)],
+            ODDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, tip_odds)],
+            STAKE: [CallbackQueryHandler(tip_stake, pattern=r"^stake_")],
+            CONFIDENCE: [CallbackQueryHandler(tip_confidence, pattern=r"^conf_")],
+            VIP_CHOICE: [CallbackQueryHandler(tip_vip_choice, pattern=r"^tipvip_")],
+        },
+        fallbacks=[CommandHandler("cancelar", cancel_tip)],
+    )
+
+    # User commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ayuda", help_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("estadisticas", stats_command))
+    app.add_handler(CommandHandler("tips", tips_command))
+    app.add_handler(CommandHandler("partidos", games_command))
+    app.add_handler(CommandHandler("vip", vip_info))
+
+    # Admin commands
+    app.add_handler(tip_conv)
+    app.add_handler(CommandHandler("resultado", set_result))
+    app.add_handler(CommandHandler("addvip", add_vip_user))
+    app.add_handler(CommandHandler("removevip", remove_vip_user))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("admin", admin_panel))
+
+    # Callback queries (botones inline)
+    app.add_handler(CallbackQueryHandler(button_callback))
+
+    # Inicializar base de datos
+    asyncio.get_event_loop().run_until_complete(init_db())
+
+    # Scheduler para tareas periódicas
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        check_expired_vips,
+        "cron",
+        hour=9,
+        minute=0,
+        args=[app.bot],
+    )
+    scheduler.start()
+
+    logger.info("🤖 Bot iniciado!")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
