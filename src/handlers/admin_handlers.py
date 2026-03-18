@@ -344,6 +344,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 Ingresos totales: *${revenue:.2f}*\n\n"
         f"{format_stats(stats)}\n\n"
         "📌 *Comandos Admin:*\n"
+        "/analizar - Análisis completo de un partido\n"
+        "/oportunidades - Escanear ligas por value bets\n"
         "/newtip - Crear nuevo tip\n"
         "/resultado - Actualizar resultado\n"
         "/addvip - Añadir VIP\n"

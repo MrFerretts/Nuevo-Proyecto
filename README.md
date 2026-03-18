@@ -11,7 +11,20 @@ Bot de Telegram para gestionar un canal de tips de apuestas deportivas con model
 - `/partidos` - Próximos partidos con cuotas en vivo
 - `/vip` - Información sobre suscripción VIP
 
-### Para el admin
+### Análisis inteligente (admin)
+- `/analizar` - Análisis completo de un partido con estadísticas y value bets
+- `/oportunidades` - Escanea automáticamente múltiples ligas buscando apuestas con valor
+
+**El motor de análisis evalúa:**
+- Forma reciente (últimos 10 partidos, ponderados por recencia)
+- Promedios de goles a favor/en contra
+- Tendencias: Over 2.5, BTTS, porterías a cero
+- Enfrentamientos directos (H2H)
+- Posición en la clasificación
+- Comparación de probabilidades estimadas vs cuotas del mercado
+- Detección de **value bets** (apuestas donde la probabilidad real supera a la cuota)
+
+### Gestión de canal (admin)
 - `/newtip` - Crear nuevo tip (guiado paso a paso)
 - `/resultado <id> <win|loss|void>` - Actualizar resultado de un tip
 - `/addvip <user_id> [meses]` - Activar VIP para un usuario
@@ -24,6 +37,7 @@ Bot de Telegram para gestionar un canal de tips de apuestas deportivas con model
 - Tracking de estadísticas y profit
 - Expiración automática de VIPs
 - Consulta de cuotas en tiempo real (The Odds API)
+- Análisis estadístico de partidos (API-Football)
 
 ## Setup
 
@@ -38,9 +52,9 @@ Bot de Telegram para gestionar un canal de tips de apuestas deportivas con model
 3. Añade tu bot como administrador en ambos canales
 4. Obtén los IDs de los canales (usa [@userinfobot](https://t.me/userinfobot))
 
-### 3. Obtener API Key de cuotas
-1. Regístrate en [The Odds API](https://the-odds-api.com/) (gratis: 500 requests/mes)
-2. Copia tu API key
+### 3. Obtener API Keys
+1. **The Odds API** (cuotas en vivo): Regístrate en [the-odds-api.com](https://the-odds-api.com/) - Gratis: 500 requests/mes
+2. **API-Football** (estadísticas y análisis): Regístrate en [api-football.com](https://www.api-football.com/) - Gratis: 100 requests/día
 
 ### 4. Configurar el proyecto
 ```bash
@@ -110,12 +124,15 @@ sudo systemctl start betting-bot
 └── src/
     ├── config.py             # Configuración
     ├── handlers/
-    │   ├── user_handlers.py  # Comandos de usuario
-    │   └── admin_handlers.py # Comandos de admin
+    │   ├── user_handlers.py     # Comandos de usuario
+    │   ├── admin_handlers.py    # Comandos de admin
+    │   └── analysis_handlers.py # Análisis de partidos
     ├── models/
-    │   └── database.py       # Base de datos SQLite
+    │   └── database.py          # Base de datos SQLite
     ├── services/
-    │   ├── odds_service.py   # API de cuotas deportivas
+    │   ├── odds_service.py      # API de cuotas deportivas
+    │   ├── stats_service.py     # API de estadísticas (API-Football)
+    │   ├── analysis_engine.py   # Motor de análisis y value betting
     │   └── scheduler_service.py # Tareas programadas
     └── utils/
         └── formatters.py     # Formateo de mensajes

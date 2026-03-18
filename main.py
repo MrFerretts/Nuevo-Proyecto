@@ -24,6 +24,11 @@ from src.handlers.admin_handlers import (
     broadcast, admin_panel,
     SPORT, MATCH, PREDICTION, ODDS, STAKE, CONFIDENCE, VIP_CHOICE,
 )
+from src.handlers.analysis_handlers import (
+    analyze_command, select_league, select_match,
+    opportunities_command, cancel_analysis,
+    SELECT_LEAGUE, SELECT_MATCH,
+)
 from src.services.scheduler_service import check_expired_vips
 
 logging.basicConfig(
@@ -65,8 +70,20 @@ def main():
     app.add_handler(CommandHandler("partidos", games_command))
     app.add_handler(CommandHandler("vip", vip_info))
 
+    # Conversation handler para análisis
+    analysis_conv = ConversationHandler(
+        entry_points=[CommandHandler("analizar", analyze_command)],
+        states={
+            SELECT_LEAGUE: [CallbackQueryHandler(select_league, pattern=r"^league_")],
+            SELECT_MATCH: [CallbackQueryHandler(select_match, pattern=r"^fixture_")],
+        },
+        fallbacks=[CommandHandler("cancelar", cancel_analysis)],
+    )
+
     # Admin commands
     app.add_handler(tip_conv)
+    app.add_handler(analysis_conv)
+    app.add_handler(CommandHandler("oportunidades", opportunities_command))
     app.add_handler(CommandHandler("resultado", set_result))
     app.add_handler(CommandHandler("addvip", add_vip_user))
     app.add_handler(CommandHandler("removevip", remove_vip_user))

@@ -8,6 +8,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 FREE_CHANNEL_ID = int(os.getenv("FREE_CHANNEL_ID", "0"))
 VIP_CHANNEL_ID = int(os.getenv("VIP_CHANNEL_ID", "0"))
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "")
 VIP_PRICE = float(os.getenv("VIP_PRICE", "9.99"))
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "")
 

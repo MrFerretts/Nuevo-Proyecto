@@ -42,7 +42,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tips - Últimos 10 tips\n"
         "/partidos - Próximos partidos\n"
         "/vip - Info VIP\n"
-        "/ayuda - Este mensaje\n",
+        "/ayuda - Este mensaje\n\n"
+        "🔧 *Admin:*\n"
+        "/analizar - Análisis completo de un partido\n"
+        "/oportunidades - Escanear ligas buscando value bets\n"
+        "/newtip - Crear nuevo tip\n"
+        "/resultado - Actualizar resultado de tip\n"
+        "/admin - Panel de administración\n",
         parse_mode="Markdown",
     )
 
