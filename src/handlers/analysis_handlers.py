@@ -220,6 +220,68 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+def _build_team_analysis(name: str, stats: dict, standing: dict) -> TeamAnalysis:
+    """Construye un TeamAnalysis desde stats de football-data.org."""
+    return TeamAnalysis(
+        name=name,
+        form_score=stats["form_score"],
+        form_detail=stats["form_detail"],
+        goals_scored_avg=stats["goals_scored_avg"],
+        goals_conceded_avg=stats["goals_conceded_avg"],
+        over25_pct=stats["over25_pct"],
+        btts_pct=stats["btts_pct"],
+        clean_sheets_pct=stats["clean_sheet_pct"],
+        league_position=standing["position"],
+        points=standing["points"],
+        # Nuevos campos
+        home_goals_scored_avg=stats.get("home_goals_scored_avg", 0),
+        home_goals_conceded_avg=stats.get("home_goals_conceded_avg", 0),
+        away_goals_scored_avg=stats.get("away_goals_scored_avg", 0),
+        away_goals_conceded_avg=stats.get("away_goals_conceded_avg", 0),
+        streak=stats.get("streak", "?"),
+        matches_played=stats.get("matches_played", 0),
+        wins=stats.get("wins", 0),
+        draws=stats.get("draws", 0),
+        losses=stats.get("losses", 0),
+        avg_total_goals=stats.get("avg_total_goals", 0),
+        over15_pct=stats.get("over15_pct", 0),
+        over35_pct=stats.get("over35_pct", 0),
+        home_win_pct=stats.get("home_win_pct", 0),
+        away_win_pct=stats.get("away_win_pct", 0),
+        rest_days=stats.get("rest_days", -1),
+    )
+
+
+async def _fetch_injuries(home_id: int, away_id: int) -> tuple[list, list]:
+    """Intenta obtener lesiones desde API-Football si está disponible."""
+    if not FOOTBALL_API_KEY:
+        return [], []
+
+    try:
+        service = get_stats_service()
+        home_injuries_raw = await service.get_injuries(home_id)
+        away_injuries_raw = await service.get_injuries(away_id)
+
+        home_injuries = []
+        for inj in home_injuries_raw[:5]:
+            player = inj.get("player", {})
+            name = player.get("name", "?")
+            reason = player.get("reason", "")
+            home_injuries.append(f"{name} ({reason})" if reason else name)
+
+        away_injuries = []
+        for inj in away_injuries_raw[:5]:
+            player = inj.get("player", {})
+            name = player.get("name", "?")
+            reason = player.get("reason", "")
+            away_injuries.append(f"{name} ({reason})" if reason else name)
+
+        return home_injuries, away_injuries
+    except Exception as e:
+        logger.warning(f"Error obteniendo lesiones: {e}")
+        return [], []
+
+
 async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     """Análisis usando football-data.org (datos actuales de temporada)."""
     fd = get_fd_service()
@@ -270,33 +332,20 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     home_standing = fd.find_in_standings(standings, home_id)
     away_standing = fd.find_in_standings(standings, away_id)
 
-    # Construir TeamAnalysis
-    home_analysis = TeamAnalysis(
-        name=home_name,
-        form_score=home_stats["form_score"],
-        form_detail=home_stats["form_detail"],
-        goals_scored_avg=home_stats["goals_scored_avg"],
-        goals_conceded_avg=home_stats["goals_conceded_avg"],
-        over25_pct=home_stats["over25_pct"],
-        btts_pct=home_stats["btts_pct"],
-        clean_sheets_pct=home_stats["clean_sheet_pct"],
-        league_position=home_standing["position"],
-        points=home_standing["points"],
-    )
-    away_analysis = TeamAnalysis(
-        name=away_name,
-        form_score=away_stats["form_score"],
-        form_detail=away_stats["form_detail"],
-        goals_scored_avg=away_stats["goals_scored_avg"],
-        goals_conceded_avg=away_stats["goals_conceded_avg"],
-        over25_pct=away_stats["over25_pct"],
-        btts_pct=away_stats["btts_pct"],
-        clean_sheets_pct=away_stats["clean_sheet_pct"],
-        league_position=away_standing["position"],
-        points=away_standing["points"],
-    )
+    # Construir TeamAnalysis con todos los campos
+    home_analysis = _build_team_analysis(home_name, home_stats, home_standing)
+    away_analysis = _build_team_analysis(away_name, away_stats, away_standing)
 
-    # Probabilidades
+    # Lesiones (desde API-Football si disponible)
+    home_injuries, away_injuries = await _fetch_injuries(home_id, away_id)
+    if home_injuries:
+        home_analysis.injuries = home_injuries
+        home_analysis.injuries_count = len(home_injuries)
+    if away_injuries:
+        away_analysis.injuries = away_injuries
+        away_analysis.injuries_count = len(away_injuries)
+
+    # Probabilidades (ahora con Poisson + ajustes)
     probs = estimate_probabilities(home_analysis, away_analysis, h2h)
 
     # Cuotas del mercado
@@ -371,7 +420,14 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
 def _extract_embedded_odds(fixture: dict, home_name: str) -> dict:
     """Extrae cuotas del _odds_data embebido desde The Odds API."""
-    odds_result = {"home": 0, "draw": 0, "away": 0, "over25": 0, "under25": 0, "btts_yes": 0, "btts_no": 0}
+    odds_result = {
+        "home": 0, "draw": 0, "away": 0,
+        "over15": 0, "under15": 0,
+        "over25": 0, "under25": 0,
+        "over35": 0, "under35": 0,
+        "btts_yes": 0, "btts_no": 0,
+        "home_or_draw": 0, "away_or_draw": 0, "home_or_away": 0,
+    }
     bookmakers = fixture.get("_odds_data", [])
     if not bookmakers:
         return odds_result
@@ -397,7 +453,14 @@ def _extract_embedded_odds(fixture: dict, home_name: str) -> dict:
 
 async def _get_market_odds(fixture: dict, home_name: str, away_name: str) -> dict:
     """Intenta obtener cuotas del mercado para el partido."""
-    odds_result = {"home": 0, "draw": 0, "away": 0, "over25": 0, "under25": 0, "btts_yes": 0, "btts_no": 0}
+    odds_result = {
+        "home": 0, "draw": 0, "away": 0,
+        "over15": 0, "under15": 0,
+        "over25": 0, "under25": 0,
+        "over35": 0, "under35": 0,
+        "btts_yes": 0, "btts_no": 0,
+        "home_or_draw": 0, "away_or_draw": 0, "home_or_away": 0,
+    }
 
     if not ODDS_API_KEY:
         return odds_result
@@ -508,28 +571,8 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
                     home_standing = fd.find_in_standings(standings_fd, home_id)
                     away_standing = fd.find_in_standings(standings_fd, away_id)
 
-                    home_analysis = TeamAnalysis(
-                        name=home_info.get("name", "?"),
-                        form_score=home_stats["form_score"], form_detail=home_stats["form_detail"],
-                        goals_scored_avg=home_stats["goals_scored_avg"],
-                        goals_conceded_avg=home_stats["goals_conceded_avg"],
-                        over25_pct=home_stats["over25_pct"],
-                        btts_pct=home_stats["btts_pct"],
-                        clean_sheets_pct=home_stats["clean_sheet_pct"],
-                        league_position=home_standing["position"],
-                        points=home_standing["points"],
-                    )
-                    away_analysis = TeamAnalysis(
-                        name=away_info.get("name", "?"),
-                        form_score=away_stats["form_score"], form_detail=away_stats["form_detail"],
-                        goals_scored_avg=away_stats["goals_scored_avg"],
-                        goals_conceded_avg=away_stats["goals_conceded_avg"],
-                        over25_pct=away_stats["over25_pct"],
-                        btts_pct=away_stats["btts_pct"],
-                        clean_sheets_pct=away_stats["clean_sheet_pct"],
-                        league_position=away_standing["position"],
-                        points=away_standing["points"],
-                    )
+                    home_analysis = _build_team_analysis(home_info.get("name", "?"), home_stats, home_standing)
+                    away_analysis = _build_team_analysis(away_info.get("name", "?"), away_stats, away_standing)
                 else:
                     # Análisis con API-Football
                     service = get_stats_service()

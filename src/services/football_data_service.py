@@ -164,7 +164,8 @@ class FootballDataService:
     def calc_team_stats(self, matches: list, team_id: int) -> dict:
         """Calcula estadísticas completas de un equipo desde sus partidos reales.
 
-        Devuelve: forma, goles, BTTS%, Over 2.5%, clean sheets, rachas, etc.
+        Devuelve: forma, goles, BTTS%, Over 1.5/2.5/3.5%, clean sheets,
+        rachas, splits local/visitante, etc.
         """
         if not matches:
             return self._empty_stats()
@@ -172,7 +173,9 @@ class FootballDataService:
         results = []
         goals_scored = []
         goals_conceded = []
+        over15_count = 0
         over25_count = 0
+        over35_count = 0
         btts_count = 0
         clean_sheets = 0
         home_wins = 0
@@ -180,6 +183,11 @@ class FootballDataService:
         away_wins = 0
         away_matches = 0
         first_half_goals = 0
+        # Splits local/visitante
+        home_goals_scored = []
+        home_goals_conceded = []
+        away_goals_scored = []
+        away_goals_conceded = []
         n = len(matches)
 
         for m in matches:
@@ -199,8 +207,12 @@ class FootballDataService:
             goals_scored.append(team_scored)
             goals_conceded.append(team_conceded)
 
+            if total_goals > 1.5:
+                over15_count += 1
             if total_goals > 2.5:
                 over25_count += 1
+            if total_goals > 3.5:
+                over35_count += 1
             if home_goals > 0 and away_goals > 0:
                 btts_count += 1
             if team_conceded == 0:
@@ -210,6 +222,8 @@ class FootballDataService:
 
             if is_home:
                 home_matches += 1
+                home_goals_scored.append(team_scored)
+                home_goals_conceded.append(team_conceded)
                 if team_scored > team_conceded:
                     results.append("W")
                     home_wins += 1
@@ -219,6 +233,8 @@ class FootballDataService:
                     results.append("L")
             else:
                 away_matches += 1
+                away_goals_scored.append(team_scored)
+                away_goals_conceded.append(team_conceded)
                 if team_scored > team_conceded:
                     results.append("W")
                     away_wins += 1
@@ -253,12 +269,26 @@ class FootballDataService:
                 else:
                     break
 
+        # Días de descanso (desde el partido más reciente)
+        rest_days = -1
+        if matches:
+            last_match_date = matches[0].get("utcDate", "")
+            if last_match_date:
+                try:
+                    last_dt = datetime.fromisoformat(last_match_date.replace("Z", "+00:00"))
+                    now = datetime.now(last_dt.tzinfo)
+                    rest_days = (now - last_dt).days
+                except (ValueError, TypeError):
+                    pass
+
         return {
             "form_score": form_score,
             "form_detail": "".join(results[:5][::-1]),
             "goals_scored_avg": sum(goals_scored) / n if n else 0,
             "goals_conceded_avg": sum(goals_conceded) / n if n else 0,
+            "over15_pct": (over15_count / n * 100) if n else 0,
             "over25_pct": (over25_count / n * 100) if n else 0,
+            "over35_pct": (over35_count / n * 100) if n else 0,
             "btts_pct": (btts_count / n * 100) if n else 0,
             "clean_sheet_pct": (clean_sheets / n * 100) if n else 0,
             "home_win_pct": (home_wins / home_matches * 100) if home_matches else 0,
@@ -272,6 +302,14 @@ class FootballDataService:
             "streak": f"{streak_count}{current_streak}" if current_streak else "?",
             "goals_scored_total": sum(goals_scored),
             "goals_conceded_total": sum(goals_conceded),
+            # Splits local/visitante
+            "home_goals_scored_avg": sum(home_goals_scored) / home_matches if home_matches else 0,
+            "home_goals_conceded_avg": sum(home_goals_conceded) / home_matches if home_matches else 0,
+            "away_goals_scored_avg": sum(away_goals_scored) / away_matches if away_matches else 0,
+            "away_goals_conceded_avg": sum(away_goals_conceded) / away_matches if away_matches else 0,
+            "home_matches": home_matches,
+            "away_matches": away_matches,
+            "rest_days": rest_days,
         }
 
     def calc_h2h_stats(self, matches: list, home_team_id: int) -> dict:
@@ -352,9 +390,13 @@ class FootballDataService:
         return {
             "form_score": 50, "form_detail": "?",
             "goals_scored_avg": 0, "goals_conceded_avg": 0,
-            "over25_pct": 0, "btts_pct": 0, "clean_sheet_pct": 0,
+            "over15_pct": 0, "over25_pct": 0, "over35_pct": 0,
+            "btts_pct": 0, "clean_sheet_pct": 0,
             "home_win_pct": 0, "away_win_pct": 0,
             "avg_total_goals": 0, "avg_first_half_goals": 0,
             "matches_played": 0, "wins": 0, "draws": 0, "losses": 0,
             "streak": "?", "goals_scored_total": 0, "goals_conceded_total": 0,
+            "home_goals_scored_avg": 0, "home_goals_conceded_avg": 0,
+            "away_goals_scored_avg": 0, "away_goals_conceded_avg": 0,
+            "home_matches": 0, "away_matches": 0, "rest_days": -1,
         }

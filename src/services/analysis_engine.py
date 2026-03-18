@@ -3,8 +3,11 @@
 Analiza partidos usando múltiples factores estadísticos para encontrar
 apuestas con valor (value bets) donde la probabilidad real estimada
 es mayor que la que implican las cuotas de las casas.
+
+Incluye modelo de Poisson para estimación de goles y resultados exactos.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,6 +27,21 @@ class TeamAnalysis:
     league_position: int = 0
     points: int = 0
     injuries_count: int = 0
+    # Nuevos campos de contexto
+    home_goals_scored_avg: float = 0.0   # Promedio goles a favor en casa
+    home_goals_conceded_avg: float = 0.0 # Promedio goles en contra en casa
+    away_goals_scored_avg: float = 0.0   # Promedio goles a favor fuera
+    away_goals_conceded_avg: float = 0.0 # Promedio goles en contra fuera
+    streak: str = ""                     # Racha actual (ej: "3W", "2L")
+    matches_played: int = 0
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+    avg_total_goals: float = 0.0         # Promedio de goles totales por partido
+    over15_pct: float = 0.0              # % partidos con +1.5 goles
+    over35_pct: float = 0.0              # % partidos con +3.5 goles
+    injuries: list = field(default_factory=list)  # Lista de lesionados
+    rest_days: int = -1                  # Días de descanso antes del partido (-1 = desconocido)
 
 
 @dataclass
@@ -54,7 +72,7 @@ class MatchAnalysis:
 
 @dataclass
 class BetSuggestion:
-    market: str           # "1X2", "Over/Under", "BTTS"
+    market: str           # "1X2", "Over/Under", "BTTS", "Doble Oportunidad", "Handicap"
     pick: str             # "Home Win", "Over 2.5", "BTTS Yes"
     estimated_prob: float # Probabilidad estimada (0-1)
     implied_prob: float   # Probabilidad implícita de la cuota (0-1)
@@ -64,6 +82,82 @@ class BetSuggestion:
     stake: int            # 1-5 recomendado
     reasoning: list       # Lista de razones
 
+
+# ══════════════════════════════════════════════════════════════════
+# MODELO DE POISSON
+# ══════════════════════════════════════════════════════════════════
+
+def _poisson_prob(lam: float, k: int) -> float:
+    """Probabilidad de Poisson: P(X=k) dado lambda."""
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    return (lam ** k) * math.exp(-lam) / math.factorial(k)
+
+
+def poisson_match_probs(home_xg: float, away_xg: float, max_goals: int = 7) -> dict:
+    """Calcula probabilidades de resultado usando distribución de Poisson.
+
+    Genera una matriz de probabilidades para cada combinación de goles
+    y deriva probabilidades de 1X2, Over/Under, BTTS, etc.
+
+    Args:
+        home_xg: Goles esperados del equipo local
+        away_xg: Goles esperados del equipo visitante
+        max_goals: Máximo de goles a considerar por equipo
+
+    Returns: dict con probabilidades de todos los mercados
+    """
+    # Construir matriz de probabilidades
+    matrix = {}
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            matrix[(h, a)] = _poisson_prob(home_xg, h) * _poisson_prob(away_xg, a)
+
+    # 1X2
+    home_win = sum(p for (h, a), p in matrix.items() if h > a)
+    draw = sum(p for (h, a), p in matrix.items() if h == a)
+    away_win = sum(p for (h, a), p in matrix.items() if h < a)
+
+    # Over/Under
+    over15 = sum(p for (h, a), p in matrix.items() if h + a > 1.5)
+    over25 = sum(p for (h, a), p in matrix.items() if h + a > 2.5)
+    over35 = sum(p for (h, a), p in matrix.items() if h + a > 3.5)
+
+    # BTTS
+    btts_yes = sum(p for (h, a), p in matrix.items() if h > 0 and a > 0)
+
+    # Doble oportunidad
+    home_or_draw = home_win + draw
+    away_or_draw = away_win + draw
+    home_or_away = home_win + away_win
+
+    # Resultados exactos más probables (top 5)
+    exact_scores = sorted(matrix.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    return {
+        "home_win": home_win,
+        "draw": draw,
+        "away_win": away_win,
+        "over15": over15,
+        "under15": 1 - over15,
+        "over25": over25,
+        "under25": 1 - over25,
+        "over35": over35,
+        "under35": 1 - over35,
+        "btts_yes": btts_yes,
+        "btts_no": 1 - btts_yes,
+        "home_or_draw": home_or_draw,
+        "away_or_draw": away_or_draw,
+        "home_or_away": home_or_away,
+        "exact_scores": exact_scores,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# FUNCIONES DE ANÁLISIS LEGACY (para API-Football fallback)
+# ══════════════════════════════════════════════════════════════════
 
 def analyze_form(fixtures: list, team_id: int) -> tuple[float, str]:
     """Analiza la forma reciente de un equipo.
@@ -226,117 +320,199 @@ def find_team_in_standings(standings: list, team_id: int) -> dict:
     return {"position": 0, "points": 0, "home": {}, "away": {}}
 
 
-def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict) -> dict:
-    """Estima probabilidades usando un modelo ponderado de múltiples factores.
+# ══════════════════════════════════════════════════════════════════
+# CÁLCULO DE GOLES ESPERADOS (xG simplificado)
+# ══════════════════════════════════════════════════════════════════
 
-    No es un modelo estadístico perfecto, pero combina varios indicadores
-    para dar una estimación razonada.
+def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
+                              league_avg_home_goals: float = 1.45,
+                              league_avg_away_goals: float = 1.15) -> tuple[float, float]:
+    """Calcula goles esperados (xG) para cada equipo usando fuerza de ataque/defensa.
+
+    Método: Compara la fuerza de ataque y defensa de cada equipo contra
+    el promedio de la liga para estimar goles esperados.
+
+    Args:
+        home: Análisis del equipo local
+        away: Análisis del equipo visitante
+        h2h: Estadísticas H2H
+        league_avg_home_goals: Promedio de goles de locales en la liga (default europeo)
+        league_avg_away_goals: Promedio de goles de visitantes en la liga
+
+    Returns: (home_xg, away_xg)
     """
-    # Factor 1: Forma reciente (peso 30%)
-    form_home = home.form_score / 100
-    form_away = away.form_score / 100
+    # Fuerza de ataque = goles marcados del equipo / promedio de la liga
+    # Fuerza de defensa = goles recibidos del equipo / promedio de la liga
+    home_attack = home.goals_scored_avg / league_avg_home_goals if league_avg_home_goals > 0 else 1.0
+    home_defense = home.goals_conceded_avg / league_avg_away_goals if league_avg_away_goals > 0 else 1.0
+    away_attack = away.goals_scored_avg / league_avg_away_goals if league_avg_away_goals > 0 else 1.0
+    away_defense = away.goals_conceded_avg / league_avg_home_goals if league_avg_home_goals > 0 else 1.0
 
-    # Factor 2: Posición en liga (peso 15%)
+    # xG = fuerza ataque del equipo × fuerza defensa del rival × promedio liga
+    home_xg = home_attack * away_defense * league_avg_home_goals
+    away_xg = away_attack * home_defense * league_avg_away_goals
+
+    # Ajuste por H2H si hay suficientes datos (>= 3 partidos)
+    h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
+    if h2h_total >= 3 and h2h.get("avg_goals", 0) > 0:
+        h2h_avg = h2h["avg_goals"]
+        current_total = home_xg + away_xg
+        if current_total > 0:
+            # Ajustar 15% hacia el promedio H2H
+            h2h_factor = h2h_avg / current_total
+            adjustment = 0.15
+            home_xg *= (1 - adjustment) + (adjustment * h2h_factor)
+            away_xg *= (1 - adjustment) + (adjustment * h2h_factor)
+
+    # Ajuste por rendimiento local/visitante específico
+    if home.home_goals_scored_avg > 0 and home.matches_played >= 5:
+        home_local_factor = home.home_goals_scored_avg / max(home.goals_scored_avg, 0.1)
+        home_xg *= (0.7 + 0.3 * home_local_factor)  # Mezclar con factor local
+
+    if away.away_goals_scored_avg > 0 and away.matches_played >= 5:
+        away_visit_factor = away.away_goals_scored_avg / max(away.goals_scored_avg, 0.1)
+        away_xg *= (0.7 + 0.3 * away_visit_factor)
+
+    # Ajuste por días de descanso
+    if home.rest_days >= 0 and away.rest_days >= 0:
+        rest_diff = home.rest_days - away.rest_days
+        if rest_diff >= 3:  # Local tiene mucho más descanso
+            home_xg *= 1.05
+            away_xg *= 0.97
+        elif rest_diff <= -3:  # Visitante tiene mucho más descanso
+            home_xg *= 0.97
+            away_xg *= 1.05
+
+    # Clamp a valores razonables
+    home_xg = max(0.3, min(4.5, home_xg))
+    away_xg = max(0.2, min(4.0, away_xg))
+
+    return home_xg, away_xg
+
+
+# ══════════════════════════════════════════════════════════════════
+# ESTIMACIÓN DE PROBABILIDADES (modelo mejorado)
+# ══════════════════════════════════════════════════════════════════
+
+def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict) -> dict:
+    """Estima probabilidades combinando Poisson con ajustes contextuales.
+
+    1. Calcula xG con fuerza de ataque/defensa
+    2. Genera probabilidades base con Poisson
+    3. Ajusta con forma reciente, posición y H2H
+    4. Normaliza y devuelve probabilidades finales
+    """
+    # Paso 1: Calcular goles esperados
+    home_xg, away_xg = calculate_expected_goals(home, away, h2h)
+
+    # Paso 2: Probabilidades Poisson (base)
+    poisson = poisson_match_probs(home_xg, away_xg)
+
+    # Paso 3: Ajustes contextuales sobre las probabilidades 1X2
+    p_home = poisson["home_win"]
+    p_draw = poisson["draw"]
+    p_away = poisson["away_win"]
+
+    # Ajuste por forma reciente (máximo ±5% shift)
+    form_diff = (home.form_score - away.form_score) / 100  # -1 a +1
+    form_shift = form_diff * 0.05
+    p_home += form_shift
+    p_away -= form_shift
+
+    # Ajuste por posición en liga (máximo ±3% shift)
     if home.league_position > 0 and away.league_position > 0:
         max_pos = max(home.league_position, away.league_position, 20)
-        pos_home = 1 - (home.league_position / (max_pos + 1))
-        pos_away = 1 - (away.league_position / (max_pos + 1))
-    else:
-        pos_home = 0.5
-        pos_away = 0.5
+        pos_diff = (away.league_position - home.league_position) / max_pos
+        pos_shift = pos_diff * 0.03
+        p_home += pos_shift
+        p_away -= pos_shift
 
-    # Factor 3: Ventaja de local (peso 10%) - estadísticamente ~46% home, 27% draw, 27% away
-    home_advantage = 0.12
+    # Ajuste por H2H (máximo ±4% shift)
+    h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
+    if h2h_total >= 3:
+        h2h_home_rate = h2h["home_wins"] / h2h_total
+        h2h_away_rate = h2h["away_wins"] / h2h_total
+        h2h_shift = (h2h_home_rate - h2h_away_rate) * 0.04
+        p_home += h2h_shift
+        p_away -= h2h_shift
 
-    # Factor 4: H2H (peso 15%)
-    h2h_total = h2h["home_wins"] + h2h["away_wins"] + h2h["draws"]
-    if h2h_total > 0:
-        h2h_home = h2h["home_wins"] / h2h_total
-        h2h_away = h2h["away_wins"] / h2h_total
-        h2h_draw = h2h["draws"] / h2h_total
-    else:
-        h2h_home = 0.45
-        h2h_away = 0.27
-        h2h_draw = 0.28
+    # Ajuste por lesiones (cada lesión clave reduce ~1.5%)
+    if home.injuries_count > 0:
+        injury_penalty = min(home.injuries_count * 0.015, 0.08)
+        p_home -= injury_penalty
+        p_away += injury_penalty * 0.5
+        p_draw += injury_penalty * 0.5
+    if away.injuries_count > 0:
+        injury_penalty = min(away.injuries_count * 0.015, 0.08)
+        p_away -= injury_penalty
+        p_home += injury_penalty * 0.5
+        p_draw += injury_penalty * 0.5
 
-    # Factor 5: Capacidad goleadora vs solidez defensiva (peso 30%)
-    home_attack = home.goals_scored_avg / max(home.goals_scored_avg + away.goals_scored_avg, 0.1)
-    home_defense = away.goals_conceded_avg / max(home.goals_conceded_avg + away.goals_conceded_avg, 0.1)
-    away_attack = away.goals_scored_avg / max(home.goals_scored_avg + away.goals_scored_avg, 0.1)
-    away_defense = home.goals_conceded_avg / max(home.goals_conceded_avg + away.goals_conceded_avg, 0.1)
-
-    attack_def_home = (home_attack + home_defense) / 2
-    attack_def_away = (away_attack + away_defense) / 2
-
-    # Combinar factores con pesos
-    raw_home = (
-        form_home * 0.30
-        + pos_home * 0.15
-        + home_advantage
-        + h2h_home * 0.15
-        + attack_def_home * 0.30
-    )
-    raw_away = (
-        form_away * 0.30
-        + pos_away * 0.15
-        + h2h_away * 0.15
-        + attack_def_away * 0.30
-    )
-    raw_draw = (
-        (1 - abs(form_home - form_away)) * 0.20
-        + h2h_draw * 0.15
-        + 0.25 * 0.15  # base draw prob
-    )
-
-    # Normalizar a probabilidades
-    total = raw_home + raw_away + raw_draw
-    home_prob = raw_home / total
-    away_prob = raw_away / total
-    draw_prob = raw_draw / total
-
-    # Over 2.5 - basado en promedios de goles y tendencias
-    expected_goals = home.goals_scored_avg + away.goals_scored_avg
-    # Usar Poisson simplificado: P(total > 2.5) basado en media esperada
-    over25_base = (home.over25_pct + away.over25_pct) / 200
-    h2h_over25 = 1 if h2h["avg_goals"] > 2.5 else 0
-    over25_prob = over25_base * 0.6 + (expected_goals / 5) * 0.25 + h2h_over25 * 0.15
-    over25_prob = max(0.15, min(0.85, over25_prob))
-
-    # BTTS
-    btts_base = (home.btts_pct + away.btts_pct) / 200
-    h2h_btts = h2h["btts_pct"] / 100
-    btts_prob = btts_base * 0.6 + h2h_btts * 0.2 + (1 - home.clean_sheets_pct / 100) * 0.1 + (1 - away.clean_sheets_pct / 100) * 0.1
-    btts_prob = max(0.15, min(0.85, btts_prob))
+    # Clamp y normalizar
+    p_home = max(0.05, p_home)
+    p_draw = max(0.05, p_draw)
+    p_away = max(0.05, p_away)
+    total = p_home + p_draw + p_away
+    p_home /= total
+    p_draw /= total
+    p_away /= total
 
     return {
-        "home_win": home_prob,
-        "draw": draw_prob,
-        "away_win": away_prob,
-        "over25": over25_prob,
-        "btts": btts_prob,
-        "expected_goals": expected_goals,
+        "home_win": p_home,
+        "draw": p_draw,
+        "away_win": p_away,
+        "over15": poisson["over15"],
+        "over25": poisson["over25"],
+        "over35": poisson["over35"],
+        "btts": poisson["btts_yes"],
+        "home_or_draw": p_home + p_draw,
+        "away_or_draw": p_away + p_draw,
+        "home_or_away": p_home + p_away,
+        "exact_scores": poisson["exact_scores"],
+        "expected_goals": home_xg + away_xg,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
     }
 
+
+# ══════════════════════════════════════════════════════════════════
+# DETECCIÓN DE VALUE BETS (ampliado con más mercados)
+# ══════════════════════════════════════════════════════════════════
 
 def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
     """Encuentra apuestas con valor comparando probabilidades estimadas vs cuotas.
 
-    Una apuesta tiene valor cuando nuestra probabilidad estimada > probabilidad implícita de la cuota.
+    Mercados soportados:
+    - 1X2 (Victoria Local / Empate / Victoria Visitante)
+    - Over/Under 1.5, 2.5, 3.5
+    - BTTS Sí/No
+    - Doble Oportunidad (1X, X2, 12)
     """
     suggestions = []
 
     markets = [
+        # 1X2
         ("1X2", "Victoria Local", probs["home_win"], odds.get("home", 0)),
         ("1X2", "Empate", probs["draw"], odds.get("draw", 0)),
         ("1X2", "Victoria Visitante", probs["away_win"], odds.get("away", 0)),
-        ("Over/Under", "Over 2.5 Goles", probs["over25"], odds.get("over25", 0)),
-        ("Over/Under", "Under 2.5 Goles", 1 - probs["over25"], odds.get("under25", 0)),
-        ("BTTS", "Ambos Marcan - Sí", probs["btts"], odds.get("btts_yes", 0)),
-        ("BTTS", "Ambos Marcan - No", 1 - probs["btts"], odds.get("btts_no", 0)),
+        # Over/Under
+        ("Over/Under", "Over 1.5 Goles", probs.get("over15", 0), odds.get("over15", 0)),
+        ("Over/Under", "Under 1.5 Goles", 1 - probs.get("over15", 1), odds.get("under15", 0)),
+        ("Over/Under", "Over 2.5 Goles", probs.get("over25", 0), odds.get("over25", 0)),
+        ("Over/Under", "Under 2.5 Goles", 1 - probs.get("over25", 1), odds.get("under25", 0)),
+        ("Over/Under", "Over 3.5 Goles", probs.get("over35", 0), odds.get("over35", 0)),
+        ("Over/Under", "Under 3.5 Goles", 1 - probs.get("over35", 1), odds.get("under35", 0)),
+        # BTTS
+        ("BTTS", "Ambos Marcan - Sí", probs.get("btts", 0), odds.get("btts_yes", 0)),
+        ("BTTS", "Ambos Marcan - No", 1 - probs.get("btts", 1), odds.get("btts_no", 0)),
+        # Doble Oportunidad
+        ("Doble Oportunidad", "Local o Empate (1X)", probs.get("home_or_draw", 0), odds.get("home_or_draw", 0)),
+        ("Doble Oportunidad", "Visitante o Empate (X2)", probs.get("away_or_draw", 0), odds.get("away_or_draw", 0)),
+        ("Doble Oportunidad", "Local o Visitante (12)", probs.get("home_or_away", 0), odds.get("home_or_away", 0)),
     ]
 
     for market, pick, est_prob, market_odds in markets:
-        if market_odds <= 1.0:
+        if market_odds <= 1.0 or est_prob <= 0:
             continue  # Sin cuota válida
 
         implied_prob = 1 / market_odds
@@ -361,7 +537,7 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
             if market_odds > 3.5:
                 stake = max(1, stake - 1)
 
-            reasoning = _build_reasoning(market, pick, est_prob, implied_prob, value, market_odds)
+            reasoning = _build_reasoning(market, pick, est_prob, implied_prob, value, market_odds, probs)
 
             suggestions.append(BetSuggestion(
                 market=market,
@@ -381,7 +557,7 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
 
 
 def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: float,
-                     value: float, odds: float) -> list[str]:
+                     value: float, odds: float, probs: dict = None) -> list[str]:
     """Construye las razones detrás de una sugerencia."""
     reasons = []
     reasons.append(f"Probabilidad estimada: {est_prob:.1%} vs implícita: {implied_prob:.1%}")
@@ -392,6 +568,14 @@ def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: floa
     elif value > 0.10:
         reasons.append("Valor ALTO - buena oportunidad")
 
+    # Razonamiento basado en xG
+    if probs and "home_xg" in probs:
+        total_xg = probs["home_xg"] + probs["away_xg"]
+        if "Over" in pick:
+            reasons.append(f"xG total esperado: {total_xg:.2f}")
+        elif "BTTS" in pick or "Ambos" in pick:
+            reasons.append(f"xG local: {probs['home_xg']:.2f} | xG visitante: {probs['away_xg']:.2f}")
+
     if odds >= 2.0 and odds <= 3.0:
         reasons.append("Cuota en rango óptimo (2.0-3.0)")
     elif odds < 1.5:
@@ -399,6 +583,10 @@ def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: floa
 
     return reasons
 
+
+# ══════════════════════════════════════════════════════════════════
+# FORMATO DEL REPORTE
+# ══════════════════════════════════════════════════════════════════
 
 def format_analysis_report(
     home: TeamAnalysis,
@@ -436,6 +624,13 @@ def format_analysis_report(
         f"📊 *FORMA RECIENTE*",
         f"🏠 {home.name}: {home.form_detail} ({home.form_score:.0f}/100)",
         f"✈️ {away.name}: {away.form_detail} ({away.form_score:.0f}/100)",
+    ])
+
+    # Rachas
+    if home.streak and home.streak != "?" and away.streak and away.streak != "?":
+        lines.append(f"🔥 Rachas: {home.name} {home.streak} | {away.name} {away.streak}")
+
+    lines.extend([
         "",
         f"⚽ *GOLES (promedio por partido)*",
         f"🏠 {home.name}: {home.goals_scored_avg:.1f} a favor | {home.goals_conceded_avg:.1f} en contra",
@@ -454,7 +649,7 @@ def format_analysis_report(
             f"✈️ {away.name}: {away.league_position}º ({away.points} pts)",
         ])
 
-    h2h_total = h2h["home_wins"] + h2h["away_wins"] + h2h["draws"]
+    h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
     if h2h_total > 0:
         lines.extend([
             "",
@@ -465,18 +660,43 @@ def format_analysis_report(
             f"⚽ Promedio goles: {h2h['avg_goals']:.1f} | BTTS: {h2h['btts_pct']:.0f}%",
         ])
 
+    # Lesiones
+    if home.injuries or away.injuries:
+        lines.extend(["", "🏥 *LESIONES/BAJAS*"])
+        if home.injuries:
+            injured_names = ", ".join(home.injuries[:5])
+            lines.append(f"🏠 {home.name}: {injured_names}")
+        if away.injuries:
+            injured_names = ", ".join(away.injuries[:5])
+            lines.append(f"✈️ {away.name}: {injured_names}")
+
+    # Días de descanso
+    if home.rest_days >= 0 and away.rest_days >= 0:
+        lines.extend([
+            "",
+            f"😴 *DESCANSO*",
+            f"🏠 {home.name}: {home.rest_days} días | ✈️ {away.name}: {away.rest_days} días",
+        ])
+
     lines.extend([
         "",
         f"{'═' * 28}",
         "",
-        f"🎯 *PROBABILIDADES ESTIMADAS*",
+        f"🎯 *PROBABILIDADES ESTIMADAS (Poisson)*",
         f"🏠 Victoria Local: *{probs['home_win']:.1%}*",
         f"🤝 Empate: *{probs['draw']:.1%}*",
         f"✈️ Victoria Visitante: *{probs['away_win']:.1%}*",
-        f"⚽ Over 2.5: *{probs['over25']:.1%}*",
-        f"⚽ BTTS: *{probs['btts']:.1%}*",
-        f"📊 Goles esperados: *{probs['expected_goals']:.1f}*",
+        "",
+        f"⚽ Over 1.5: {probs.get('over15', 0):.0%} | Over 2.5: {probs.get('over25', 0):.0%} | Over 3.5: {probs.get('over35', 0):.0%}",
+        f"⚽ BTTS: *{probs.get('btts', 0):.1%}*",
+        f"📊 xG: *{probs.get('home_xg', 0):.2f}* - *{probs.get('away_xg', 0):.2f}* (Total: *{probs.get('expected_goals', 0):.2f}*)",
     ])
+
+    # Resultados exactos más probables
+    exact_scores = probs.get("exact_scores", [])
+    if exact_scores:
+        scores_str = " | ".join([f"{h}-{a} ({p:.0%})" for (h, a), p in exact_scores[:3]])
+        lines.append(f"🎲 Marcadores: {scores_str}")
 
     if suggestions:
         lines.extend([
