@@ -23,7 +23,7 @@ class FootballStatsService:
             "x-apisports-key": api_key,
         }
 
-    async def _get(self, endpoint: str, params: dict) -> Optional[dict]:
+    async def _get(self, endpoint: str, params: dict) -> Optional[list]:
         async with aiohttp.ClientSession() as session:
             url = f"{API_BASE}/{endpoint}"
             logger.info(f"API Request: {url} params={params}")
@@ -39,6 +39,7 @@ class FootballStatsService:
                 errors = data.get("errors", {})
                 if errors:
                     logger.error(f"API Errors: {errors} for {endpoint} params={params}")
+                    return None  # No devolver datos vacíos si hay error de API
                 results = data.get("response", [])
                 logger.info(f"API Response: {endpoint} returned {len(results) if isinstance(results, list) else 'dict'} results")
                 return results
@@ -63,16 +64,42 @@ class FootballStatsService:
         return results if results else None
 
     async def get_head_to_head(self, team1_id: int, team2_id: int, last: int = 10) -> list:
-        """Historial de enfrentamientos directos."""
+        """Historial de enfrentamientos directos.
+
+        Intenta con 'last', si falla usa season 2024 como fallback.
+        """
         params = {"h2h": f"{team1_id}-{team2_id}", "last": last}
         results = await self._get("fixtures/headtohead", params)
-        return results or []
+        if results:
+            return results
+
+        # Fallback: usar season permitida en plan gratuito
+        for season in [2024, 2023]:
+            params = {"h2h": f"{team1_id}-{team2_id}", "season": season}
+            results = await self._get("fixtures/headtohead", params)
+            if results:
+                logger.info(f"H2H fallback worked with season={season}")
+                return results[-last:]  # últimos N partidos
+        return []
 
     async def get_team_form(self, team_id: int, last: int = 10) -> list:
-        """Últimos partidos de un equipo."""
+        """Últimos partidos de un equipo.
+
+        Intenta con 'last', si falla usa season 2024 como fallback.
+        """
         params = {"team": team_id, "last": last}
         results = await self._get("fixtures", params)
-        return results or []
+        if results:
+            return results
+
+        # Fallback: usar season permitida en plan gratuito
+        for season in [2024, 2023]:
+            params = {"team": team_id, "season": season}
+            results = await self._get("fixtures", params)
+            if results:
+                logger.info(f"Team form fallback worked with season={season} ({len(results)} fixtures)")
+                return results[-last:]  # últimos N partidos de esa temporada
+        return []
 
     async def get_standings(self, league_id: int, season: int) -> list:
         """Clasificación de una liga. Intenta season actual, luego fallback a 2024."""
@@ -180,7 +207,7 @@ LEAGUE_TO_ODDS_SPORT = {
     135: "soccer_italy_serie_a",
     78: "soccer_germany_bundesliga",
     61: "soccer_france_ligue_one",
-    2: "soccer_uefa_champions_league",
+    2: "soccer_uefa_champs_league",
     3: "soccer_uefa_europa_league",
     262: "soccer_mexico_ligamx",
     253: "soccer_usa_mls",
