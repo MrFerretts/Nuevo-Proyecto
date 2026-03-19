@@ -123,15 +123,19 @@ _fd_team_cache: dict[str, int] = {}
 
 
 async def _try_fd_team_data(fd, home_name: str, away_name: str,
-                            home_id: int, away_id: int) -> tuple[list, list]:
+                            home_id: int, away_id: int) -> tuple[list, list, int | None, int | None]:
     """Obtiene datos de equipos desde football-data.org buscando en standings de ligas top.
 
     Los equipos de Europa League juegan en ligas domésticas que SÍ están en el
     plan gratuito. Buscamos el equipo por nombre en los standings de las 5 grandes
     ligas + Champions, y una vez encontrado su fd_id, obtenemos sus partidos.
+
+    Returns: (home_matches, away_matches, fd_home_id, fd_away_id)
     """
     home_matches = []
     away_matches = []
+    fd_home_id = None
+    fd_away_id = None
 
     try:
         # Buscar equipos en standings de ligas disponibles
@@ -153,7 +157,7 @@ async def _try_fd_team_data(fd, home_name: str, away_name: str,
     except Exception as e:
         logger.warning(f"Error buscando team data en FD: {e}")
 
-    return home_matches, away_matches
+    return home_matches, away_matches, fd_home_id, fd_away_id
 
 
 async def _find_fd_team_in_leagues(fd, team_name: str) -> int | None:
@@ -565,14 +569,16 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     fd = get_fd_service()
     used_fd = False
     if fd:
-        fd_home_matches, fd_away_matches = await _try_fd_team_data(fd, home_name, away_name, home_id, away_id)
+        fd_home_matches, fd_away_matches, fd_home_id, fd_away_id = await _try_fd_team_data(fd, home_name, away_name, home_id, away_id)
         if fd_home_matches or fd_away_matches:
             used_fd = True
             logger.info(f"Europa League fix: usando football-data.org por equipo "
                         f"(home={len(fd_home_matches)}, away={len(fd_away_matches)} partidos)")
 
-            home_stats = fd.calc_team_stats(fd_home_matches, home_id) if fd_home_matches else fd._empty_stats()
-            away_stats = fd.calc_team_stats(fd_away_matches, away_id) if fd_away_matches else fd._empty_stats()
+            # IMPORTANTE: usar fd_home_id/fd_away_id (de football-data.org), NO home_id/away_id (de API-Football)
+            # Si se usa el ID incorrecto, calc_team_stats invierte local/visitante
+            home_stats = fd.calc_team_stats(fd_home_matches, fd_home_id) if fd_home_matches else fd._empty_stats()
+            away_stats = fd.calc_team_stats(fd_away_matches, fd_away_id) if fd_away_matches else fd._empty_stats()
 
             h2h = {"home_wins": 0, "away_wins": 0, "draws": 0, "avg_goals": 0, "btts_pct": 0}
 
