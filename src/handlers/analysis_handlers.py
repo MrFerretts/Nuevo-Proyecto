@@ -118,68 +118,119 @@ async def _save_analysis_prediction(
         logger.warning(f"Error guardando predicción: {e}")
 
 
+# Cache de equipos por nombre → fd team_id (se llena al buscar en standings)
+_fd_team_cache: dict[str, int] = {}
+
+
 async def _try_fd_team_data(fd, home_name: str, away_name: str,
                             home_id: int, away_id: int) -> tuple[list, list]:
-    """Intenta obtener datos de equipos desde football-data.org por team ID.
+    """Obtiene datos de equipos desde football-data.org buscando en standings de ligas top.
 
-    El endpoint /teams/{id}/matches funciona para CUALQUIER equipo europeo
-    aunque la competición (Europa League, etc.) no esté en el plan gratuito.
-    Los team IDs de API-Football y football-data.org son diferentes, así que
-    buscamos por nombre.
+    Los equipos de Europa League juegan en ligas domésticas que SÍ están en el
+    plan gratuito. Buscamos el equipo por nombre en los standings de las 5 grandes
+    ligas + Champions, y una vez encontrado su fd_id, obtenemos sus partidos.
     """
     home_matches = []
     away_matches = []
 
     try:
-        # Buscar equipos por nombre en football-data.org
-        fd_home_id = await _search_fd_team_id(fd, home_name)
-        fd_away_id = await _search_fd_team_id(fd, away_name)
+        # Buscar equipos en standings de ligas disponibles
+        fd_home_id = await _find_fd_team_in_leagues(fd, home_name)
+        fd_away_id = await _find_fd_team_in_leagues(fd, away_name)
 
         if fd_home_id:
             home_matches = await fd.get_team_matches(fd_home_id, limit=15)
             logger.info(f"FD team data: {home_name} (fd_id={fd_home_id}) → {len(home_matches)} partidos")
+        else:
+            logger.warning(f"FD: no se encontró '{home_name}' en ninguna liga disponible")
+
         if fd_away_id:
             away_matches = await fd.get_team_matches(fd_away_id, limit=15)
             logger.info(f"FD team data: {away_name} (fd_id={fd_away_id}) → {len(away_matches)} partidos")
+        else:
+            logger.warning(f"FD: no se encontró '{away_name}' en ninguna liga disponible")
+
     except Exception as e:
         logger.warning(f"Error buscando team data en FD: {e}")
 
     return home_matches, away_matches
 
 
-async def _search_fd_team_id(fd, team_name: str) -> int | None:
-    """Busca un equipo en football-data.org por nombre.
+async def _find_fd_team_in_leagues(fd, team_name: str) -> int | None:
+    """Busca un equipo por nombre en los standings de todas las ligas disponibles.
 
-    Usa el endpoint /teams con filtro de nombre.
+    Los equipos de Europa League siempre juegan en una liga doméstica que
+    football-data.org sí tiene en el plan gratuito (PL, PD, SA, BL1, FL1, etc.).
     """
-    try:
-        data = await fd._get("teams", {"name": team_name, "limit": 5})
-        if not data:
-            return None
+    name_lower = team_name.lower()
 
-        teams = data.get("teams", [])
-        if not teams:
-            return None
+    # Revisar cache primero
+    if name_lower in _fd_team_cache:
+        return _fd_team_cache[name_lower]
 
-        name_lower = team_name.lower()
-        # Match exacto
-        for t in teams:
-            if t.get("name", "").lower() == name_lower:
-                return t["id"]
-        # Match parcial
-        for t in teams:
-            t_name = t.get("name", "").lower()
-            short = t.get("shortName", "").lower()
-            tla = t.get("tla", "").lower()
-            if (name_lower in t_name or t_name in name_lower or
-                    name_lower in short or short in name_lower):
-                return t["id"]
+    # Ligas a buscar (las del plan gratis con más equipos europeos)
+    search_leagues = ["PL", "PD", "SA", "BL1", "FL1", "DED", "PPL", "CL"]
 
-        # Si hay resultados, usar el primero
-        return teams[0]["id"] if teams else None
-    except Exception as e:
-        logger.warning(f"Error buscando team '{team_name}' en FD: {e}")
-        return None
+    for comp_code in search_leagues:
+        try:
+            standings = await fd.get_standings(comp_code)
+            if not standings:
+                continue
+
+            for entry in standings:
+                team_data = entry.get("team", {})
+                fd_name = team_data.get("name", "").lower()
+                fd_short = team_data.get("shortName", "").lower()
+                fd_tla = team_data.get("tla", "").lower()
+                fd_id = team_data.get("id")
+
+                if not fd_id:
+                    continue
+
+                # Cachear todos los equipos que vemos
+                _fd_team_cache[fd_name] = fd_id
+                if fd_short:
+                    _fd_team_cache[fd_short] = fd_id
+
+                # Verificar match con el equipo buscado
+                if _team_name_matches(name_lower, fd_name, fd_short, fd_tla):
+                    _fd_team_cache[name_lower] = fd_id
+                    logger.info(f"FD team found: '{team_name}' → id={fd_id} (en {comp_code}, nombre FD='{team_data.get('name')}')")
+                    return fd_id
+
+        except Exception as e:
+            logger.warning(f"Error buscando en standings de {comp_code}: {e}")
+            continue
+
+    logger.warning(f"FD team NOT found: '{team_name}' en ninguna liga")
+    return None
+
+
+def _team_name_matches(search: str, name: str, short: str, tla: str) -> bool:
+    """Verifica si un nombre de equipo buscado coincide con datos de football-data.org.
+
+    Maneja casos como:
+    - "Athletic Club" vs "Athletic Club"
+    - "AS Roma" vs "Roma"
+    - "Tottenham Hotspur" vs "Tottenham"
+    - "Man United" vs "Manchester United"
+    """
+    if search == name or search == short:
+        return True
+    # Contenido parcial (ambas direcciones)
+    if len(search) >= 4 and (search in name or name in search):
+        return True
+    if short and len(short) >= 3 and (search in short or short in search):
+        return True
+    # Palabras clave significativas
+    noise = {"fc", "cf", "sc", "ac", "as", "ss", "de", "la", "el", "cd", "ud", "rc", "sd", "1.", "real", "sporting", "club", "united", "city"}
+    search_words = set(search.split()) - noise
+    name_words = set(name.split()) - noise
+    if search_words and name_words:
+        overlap = search_words & name_words
+        if overlap and any(len(w) >= 4 for w in overlap):
+            return True
+    return False
 
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
