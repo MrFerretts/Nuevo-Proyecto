@@ -251,3 +251,55 @@ Máximo 1000 caracteres en tu respuesta. Usa emojis con moderación.
 Pregunta del usuario: {user_message}"""
 
         return await self._call_groq(prompt, max_tokens=600)
+
+    async def parse_bet(self, user_message: str, last_analysis: str = "") -> dict | None:
+        """Parsea lenguaje natural de una apuesta y extrae datos estructurados.
+
+        Ejemplo: "le meto 50 al man u over 1.5, paga x3"
+        → {"match": "Manchester United vs ...", "pick": "Over 1.5 goles", "odds": 3.0, "stake": 50}
+        """
+        if not self.api_key:
+            return None
+
+        context_block = ""
+        if last_analysis:
+            trimmed = last_analysis[:1500]
+            context_block = f"""
+CONTEXTO - Último análisis del bot (usa esto para identificar equipos y partidos):
+{trimmed}
+"""
+
+        prompt = f"""Eres un parser de apuestas deportivas. El usuario describe una apuesta en lenguaje informal/natural.
+Tu trabajo es extraer los datos estructurados.
+
+REGLAS:
+- Identifica el PARTIDO (equipos involucrados). Si dice "man u", "barca", "juve", etc., usa el nombre completo.
+- Identifica el PICK (qué apuesta: victoria, over/under, BTTS, handicap, etc.)
+- Identifica la CUOTA (odds). Puede decir "paga x3", "a 2.10", "cuota 1.85", "@1.90", etc. Si dice "x3" = cuota 3.00
+- Identifica el STAKE (monto a apostar). Puede decir "le meto 50", "apuesto 100", "$25", etc.
+- Si falta algún dato, pon null en ese campo.
+{context_block}
+MENSAJE DEL USUARIO: {user_message}
+
+Responde ÚNICAMENTE con un JSON válido (sin markdown, sin ```), con esta estructura exacta:
+{{"match": "Equipo A vs Equipo B", "pick": "descripción de la apuesta", "odds": 3.0, "stake": 50}}
+
+Si no puedes identificar al menos el pick, responde: {{"error": "No entendí tu apuesta"}}"""
+
+        result = await self._call_groq(prompt, max_tokens=200)
+        if not result:
+            return None
+
+        try:
+            # Limpiar posibles marcadores de código
+            cleaned = result.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+            cleaned = cleaned.strip()
+
+            return json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Groq parse_bet: JSON inválido: {result[:200]} - {e}")
+            return None

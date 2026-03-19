@@ -31,11 +31,9 @@ from src.handlers.analysis_handlers import (
     SELECT_LEAGUE, SELECT_MATCH,
 )
 from src.handlers.bankroll_handlers import (
-    bankroll_command, set_bankroll_command, kelly_command,
-    bet_command, bet_match, bet_pick, bet_odds,
-    bet_stake_button, bet_stake_text, cancel_bet,
+    bankroll_command, set_bankroll_command,
+    bet_command, confirm_bet_callback,
     resolve_bet_command, my_bets_command,
-    BET_MATCH, BET_PICK, BET_ODDS, BET_STAKE,
 )
 from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions
 
@@ -82,25 +80,10 @@ def main():
     # Bankroll commands
     app.add_handler(CommandHandler("bankroll", bankroll_command))
     app.add_handler(CommandHandler("setbankroll", set_bankroll_command))
-    app.add_handler(CommandHandler("kelly", kelly_command))
+    app.add_handler(CommandHandler("apostar", bet_command))
     app.add_handler(CommandHandler("misapuestas", my_bets_command))
     app.add_handler(CommandHandler("resultado_apuesta", resolve_bet_command))
-
-    # Conversation handler para registrar apuestas
-    bet_conv = ConversationHandler(
-        entry_points=[CommandHandler("apostar", bet_command)],
-        states={
-            BET_MATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, bet_match)],
-            BET_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, bet_pick)],
-            BET_ODDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bet_odds)],
-            BET_STAKE: [
-                CallbackQueryHandler(bet_stake_button, pattern=r"^betstake_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, bet_stake_text),
-            ],
-        },
-        fallbacks=[CommandHandler("cancelar", cancel_bet)],
-    )
-    app.add_handler(bet_conv)
+    app.add_handler(CallbackQueryHandler(confirm_bet_callback, pattern=r"^confirmbet_"))
 
     # Conversation handler para análisis
     analysis_conv = ConversationHandler(

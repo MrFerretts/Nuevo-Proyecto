@@ -2,29 +2,26 @@
 
 Comandos:
   /bankroll          - Ver estado del bankroll y ROI
-  /apostar           - Registrar una apuesta
+  /apostar           - Registrar apuesta con lenguaje natural
   /misapuestas       - Ver historial de apuestas
   /resultado_apuesta - Resolver una apuesta (win/loss/void)
-  /kelly             - Calcular Kelly para una cuota
   /setbankroll       - Establecer bankroll inicial
 """
 
 import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ContextTypes
 
+from src.config import GROQ_API_KEY
 from src.models.database import (
     get_or_create_bankroll, set_bankroll, add_user_bet,
     resolve_user_bet, get_user_bets, get_user_pending_bets,
     get_user_bet_stats,
 )
-from src.services.bankroll_service import kelly_criterion, calculate_stake, format_kelly_suggestion
+from src.services.ai_analysis_service import AIAnalysisService
 
 logger = logging.getLogger(__name__)
-
-# Conversation states para /apostar
-BET_MATCH, BET_PICK, BET_ODDS, BET_STAKE = range(100, 104)
 
 
 async def bankroll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,7 +49,6 @@ async def bankroll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     winrate = (wins / resolved * 100) if resolved > 0 else 0
     yield_pct = (total_profit / total_staked * 100) if total_staked > 0 else 0
 
-    # Emoji de tendencia
     if roi > 5:
         trend = "📈"
     elif roi < -5:
@@ -77,8 +73,7 @@ async def bankroll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Cuota promedio:* {avg_odds:.2f}\n"
         f"🏆 *Mejor:* +${best_win:.2f} | 💀 *Peor:* ${worst_loss:.2f}\n"
         f"{'─' * 28}\n"
-        f"_Usa /apostar para registrar una apuesta_\n"
-        f"_Usa /kelly <cuota> <prob> para calcular stake_"
+        f"_Usa /apostar para registrar una apuesta_"
     )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -113,43 +108,35 @@ async def set_bankroll_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
-async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calcula Kelly Criterion. Uso: /kelly <cuota> <probabilidad%>"""
-    if len(context.args) < 2:
+# ══════════════════════════════════════════════════════════════
+# REGISTRAR APUESTA CON LENGUAJE NATURAL
+# ══════════════════════════════════════════════════════════════
+
+async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registra una apuesta con lenguaje natural.
+
+    Ejemplos:
+      /apostar le meto 50 al man u over 1.5, paga x3
+      /apostar 30 al barca gana, cuota 1.85
+      /apostar over 2.5 en el liverpool arsenal, 20 dolares a 2.10
+    """
+    if not GROQ_API_KEY:
+        await update.message.reply_text("❌ Falta GROQ\\_API\\_KEY para usar esta función.", parse_mode="Markdown")
+        return
+
+    user_text = " ".join(context.args) if context.args else ""
+    if not user_text:
         await update.message.reply_text(
-            "📊 *Kelly Criterion*\n\n"
-            "Calcula cuánto apostar de forma óptima.\n\n"
-            "Uso: `/kelly <cuota> <probabilidad>`\n"
-            "Ejemplo: `/kelly 2.10 55`\n"
-            "_(cuota 2.10, probabilidad estimada 55%)_",
+            "📝 *REGISTRAR APUESTA*\n\n"
+            "Escríbelo como quieras, la IA lo entiende:\n\n"
+            "`/apostar le meto 50 al man u over 1.5, paga x3`\n"
+            "`/apostar 30 al barca gana, cuota 1.85`\n"
+            "`/apostar btts en liverpool arsenal, 20 a 1.90`\n\n"
+            "_La IA detecta el partido, tu apuesta, la cuota y el monto._",
             parse_mode="Markdown",
         )
         return
 
-    try:
-        odds = float(context.args[0])
-        prob = float(context.args[1])
-        if prob > 1:
-            prob = prob / 100  # Convertir de % a decimal
-        if odds <= 1 or prob <= 0 or prob >= 1:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Formato: `/kelly 2.10 55`", parse_mode="Markdown")
-        return
-
-    user_id = update.effective_user.id
-    br = await get_or_create_bankroll(user_id)
-
-    text = format_kelly_suggestion(br["current_bankroll"], odds, prob)
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-# ══════════════════════════════════════════════════════════════
-# CONVERSACIÓN: REGISTRAR APUESTA
-# ══════════════════════════════════════════════════════════════
-
-async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el registro de una apuesta. /apostar"""
     user_id = update.effective_user.id
     br = await get_or_create_bankroll(user_id)
 
@@ -158,127 +145,123 @@ async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💀 Tu bankroll está en $0. Usa `/setbankroll <monto>` para reiniciar.",
             parse_mode="Markdown",
         )
-        return ConversationHandler.END
+        return
 
-    context.user_data["bet_data"] = {"bankroll": br["current_bankroll"]}
+    msg = await update.message.reply_text("🤖 Entendiendo tu apuesta...")
 
-    await update.message.reply_text(
-        f"📝 *REGISTRAR APUESTA*\n"
-        f"💰 Bankroll actual: *${br['current_bankroll']:.2f}*\n\n"
-        f"Escribe el *partido* (ej: Barcelona vs Real Madrid):",
-        parse_mode="Markdown",
-    )
-    return BET_MATCH
-
-
-async def bet_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe el nombre del partido."""
-    context.user_data["bet_data"]["match"] = update.message.text
-
-    await update.message.reply_text(
-        "🎯 ¿Cuál es tu *pick/apuesta*?\n"
-        "(ej: Over 2.5, Victoria Local, BTTS Sí, etc.):",
-        parse_mode="Markdown",
-    )
-    return BET_PICK
-
-
-async def bet_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe el pick."""
-    context.user_data["bet_data"]["pick"] = update.message.text
-
-    await update.message.reply_text(
-        "💹 ¿A qué *cuota*? (ej: 1.85):",
-        parse_mode="Markdown",
-    )
-    return BET_ODDS
-
-
-async def bet_odds(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe la cuota y sugiere stake con Kelly."""
-    try:
-        odds = float(update.message.text.replace(",", "."))
-        if odds <= 1:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Cuota inválida. Ejemplo: `1.85`", parse_mode="Markdown")
-        return BET_ODDS
-
-    context.user_data["bet_data"]["odds"] = odds
-    bankroll = context.user_data["bet_data"]["bankroll"]
-
-    # Verificar si hay análisis previo con probabilidad estimada
+    # Usar Groq para parsear el lenguaje natural
+    ai = AIAnalysisService(GROQ_API_KEY)
     last_analysis = context.user_data.get("last_analysis", "")
-    estimated_prob = 0
+    parsed = await ai.parse_bet(user_text, last_analysis=last_analysis)
 
-    # Intentar obtener probabilidad del contexto de análisis
-    # Sugerencia de Kelly si hay probabilidad
-    kelly_text = ""
-    if estimated_prob > 0:
-        kelly_text = "\n" + format_kelly_suggestion(bankroll, odds, estimated_prob) + "\n"
+    if not parsed or "error" in parsed:
+        error_msg = parsed.get("error", "No entendí tu apuesta") if parsed else "Error de conexión con IA"
+        await msg.edit_text(
+            f"❌ {error_msg}\n\n"
+            "Intenta algo como:\n"
+            "`/apostar 50 al man u over 1.5, paga x3`",
+            parse_mode="Markdown",
+        )
+        return
 
-    # Botones de stake rápido
-    stakes = [
-        round(bankroll * 0.01, 2),  # 1%
-        round(bankroll * 0.02, 2),  # 2%
-        round(bankroll * 0.03, 2),  # 3%
-        round(bankroll * 0.05, 2),  # 5%
-    ]
+    match_name = parsed.get("match", "")
+    pick = parsed.get("pick", "")
+    odds = parsed.get("odds")
+    stake = parsed.get("stake")
+
+    # Validar campos obligatorios
+    if not pick:
+        await msg.edit_text("❌ No pude identificar qué quieres apostar. Intenta de nuevo.")
+        return
+
+    # Pedir datos faltantes
+    missing = []
+    if not match_name:
+        missing.append("partido")
+    if not odds:
+        missing.append("cuota")
+    if not stake:
+        missing.append("monto")
+
+    if missing:
+        # Guardar lo que tenemos y pedir lo que falta
+        context.user_data["pending_bet"] = parsed
+        await msg.edit_text(
+            f"🤖 Entendí esto:\n"
+            f"{'⚽ ' + match_name if match_name else ''}"
+            f"{'🎯 ' + pick if pick else ''}\n"
+            f"{'💹 Cuota: ' + str(odds) if odds else ''}"
+            f"{'💰 Stake: $' + str(stake) if stake else ''}\n\n"
+            f"❓ Me falta: *{', '.join(missing)}*\n"
+            f"Intenta de nuevo con todos los datos.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Validar odds y stake
+    try:
+        odds = float(odds)
+        stake = float(stake)
+        if odds <= 1 or stake <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await msg.edit_text("❌ La cuota o el monto no son válidos. Intenta de nuevo.")
+        return
+
+    if stake > br["current_bankroll"]:
+        await msg.edit_text(
+            f"❌ No puedes apostar ${stake:.2f}, tu bankroll es ${br['current_bankroll']:.2f}",
+        )
+        return
+
+    # Guardar datos para confirmación
+    context.user_data["confirm_bet"] = {
+        "match": match_name,
+        "pick": pick,
+        "odds": odds,
+        "stake": stake,
+    }
+
+    potential = stake * (odds - 1)
     keyboard = [
         [
-            InlineKeyboardButton(f"1% (${stakes[0]:.0f})", callback_data=f"betstake_{stakes[0]}"),
-            InlineKeyboardButton(f"2% (${stakes[1]:.0f})", callback_data=f"betstake_{stakes[1]}"),
-        ],
-        [
-            InlineKeyboardButton(f"3% (${stakes[2]:.0f})", callback_data=f"betstake_{stakes[2]}"),
-            InlineKeyboardButton(f"5% (${stakes[3]:.0f})", callback_data=f"betstake_{stakes[3]}"),
-        ],
+            InlineKeyboardButton("✅ Confirmar", callback_data="confirmbet_yes"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="confirmbet_no"),
+        ]
     ]
 
-    await update.message.reply_text(
-        f"💰 ¿Cuánto vas a apostar?\n"
-        f"Bankroll: *${bankroll:.2f}*\n"
-        f"{kelly_text}\n"
-        f"Elige un porcentaje o escribe el monto:",
+    await msg.edit_text(
+        f"📝 *¿Confirmas esta apuesta?*\n"
+        f"{'─' * 28}\n"
+        f"⚽ {match_name}\n"
+        f"🎯 {pick}\n"
+        f"💹 Cuota: {odds:.2f}\n"
+        f"💰 Stake: ${stake:.2f}\n"
+        f"🎁 Ganancia potencial: +${potential:.2f}\n"
+        f"{'─' * 28}\n"
+        f"💼 Bankroll: ${br['current_bankroll']:.2f}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
-    return BET_STAKE
 
 
-async def bet_stake_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe el stake desde un botón."""
+async def confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja la confirmación o cancelación de una apuesta."""
     query = update.callback_query
     await query.answer()
-    stake = float(query.data.replace("betstake_", ""))
-    return await _save_bet(query.message, context, stake, edit=True)
 
+    if query.data == "confirmbet_no":
+        context.user_data.pop("confirm_bet", None)
+        await query.edit_message_text("❌ Apuesta cancelada.")
+        return
 
-async def bet_stake_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe el stake como texto."""
-    try:
-        stake = float(update.message.text.replace(",", ".").replace("$", ""))
-        if stake <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Monto inválido. Ejemplo: `25` o `25.50`", parse_mode="Markdown")
-        return BET_STAKE
+    # confirmbet_yes
+    data = context.user_data.pop("confirm_bet", None)
+    if not data:
+        await query.edit_message_text("❌ No hay apuesta pendiente.")
+        return
 
-    return await _save_bet(update.message, context, stake, edit=False)
-
-
-async def _save_bet(message, context, stake: float, edit: bool = False):
-    """Guarda la apuesta en la base de datos."""
-    data = context.user_data["bet_data"]
-    user_id = message.chat.id
-
-    if stake > data["bankroll"]:
-        text = f"❌ No puedes apostar ${stake:.2f}, tu bankroll es ${data['bankroll']:.2f}"
-        if edit:
-            await message.edit_text(text)
-        else:
-            await message.reply_text(text)
-        return BET_STAKE
+    user_id = query.from_user.id
 
     bet_id = await add_user_bet(
         user_id=user_id,
@@ -286,39 +269,27 @@ async def _save_bet(message, context, stake: float, edit: bool = False):
         league="",
         pick=data["pick"],
         odds=data["odds"],
-        stake=stake,
+        stake=data["stake"],
     )
 
     br = await get_or_create_bankroll(user_id)
-    potential = stake * (data["odds"] - 1)
+    potential = data["stake"] * (data["odds"] - 1)
 
-    text = (
+    await query.edit_message_text(
         f"✅ *APUESTA REGISTRADA* (#{bet_id})\n"
         f"{'─' * 28}\n"
         f"⚽ {data['match']}\n"
         f"🎯 {data['pick']} @ {data['odds']:.2f}\n"
-        f"💰 Stake: ${stake:.2f}\n"
+        f"💰 Stake: ${data['stake']:.2f}\n"
         f"🎁 Ganancia potencial: +${potential:.2f}\n"
         f"{'─' * 28}\n"
         f"💼 Bankroll restante: *${br['current_bankroll']:.2f}*\n\n"
         f"_Cuando termine el partido usa:_\n"
         f"`/resultado_apuesta {bet_id} win` ✅\n"
         f"`/resultado_apuesta {bet_id} loss` ❌\n"
-        f"`/resultado_apuesta {bet_id} void` ↩️"
+        f"`/resultado_apuesta {bet_id} void` ↩️",
+        parse_mode="Markdown",
     )
-
-    if edit:
-        await message.edit_text(text, parse_mode="Markdown")
-    else:
-        await message.reply_text(text, parse_mode="Markdown")
-
-    return ConversationHandler.END
-
-
-async def cancel_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancela el registro de apuesta."""
-    await update.message.reply_text("❌ Registro de apuesta cancelado.")
-    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════════════════
@@ -328,7 +299,6 @@ async def cancel_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def resolve_bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resuelve una apuesta. Uso: /resultado_apuesta <id> <win|loss|void>"""
     if len(context.args) < 2:
-        # Mostrar apuestas pendientes
         user_id = update.effective_user.id
         pending = await get_user_pending_bets(user_id)
         if not pending:
