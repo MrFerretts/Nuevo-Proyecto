@@ -295,9 +295,9 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     if use_fd and can_use_fd(league_id):
-                        report = await run_fd_analysis(fixture, league_id)
+                        report, bet_suggestions = await run_fd_analysis(fixture, league_id)
                     else:
-                        report = await run_full_analysis(fixture, league_id, season)
+                        report, bet_suggestions = await run_full_analysis(fixture, league_id, season)
 
                     context.user_data["last_analysis"] = report
 
@@ -308,6 +308,8 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await update.message.reply_text(part, parse_mode="Markdown")
                     else:
                         await msg.edit_text(report, parse_mode="Markdown")
+
+                    await _send_quick_bet_buttons(update.message, context, bet_suggestions)
                 except Exception as e:
                     logger.error(f"Analysis error: {e}", exc_info=True)
                     await msg.edit_text(f"❌ Error en el análisis: {e}")
@@ -463,6 +465,138 @@ def _convert_fd_fixtures(fd_matches: list) -> list:
     return fixtures
 
 
+import json as _json
+
+
+async def _send_quick_bet_buttons(message, context, bet_suggestions: list):
+    """Envía botones de apuesta rápida después de un análisis."""
+    if not bet_suggestions:
+        return
+
+    # Guardar sugerencias en user_data para el callback
+    context.user_data["quick_bets"] = bet_suggestions
+
+    keyboard = []
+    for i, s in enumerate(bet_suggestions):
+        label = f"💰 {s['pick']} @ {s['odds']:.2f}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"quickbet_{i}")])
+
+    await message.reply_text(
+        "⚡ *¿Quieres apostar?*\n"
+        "_Selecciona una apuesta o usa /apostar para personalizar:_",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def quick_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja el tap en un botón de apuesta rápida del análisis."""
+    query = update.callback_query
+    await query.answer()
+
+    idx = int(query.data.replace("quickbet_", ""))
+    bets = context.user_data.get("quick_bets", [])
+
+    if idx >= len(bets):
+        await query.edit_message_text("❌ Apuesta no disponible.")
+        return
+
+    bet = bets[idx]
+    # Guardar como confirm_bet para reusar el flujo de confirmación
+    from src.models.database import get_or_create_bankroll
+    user_id = query.from_user.id
+    br = await get_or_create_bankroll(user_id)
+    bankroll = br["current_bankroll"]
+
+    # Calcular stake sugerido (2% del bankroll)
+    suggested_stake = round(bankroll * 0.02, 2)
+
+    stakes = [
+        round(bankroll * 0.01, 2),
+        round(bankroll * 0.02, 2),
+        round(bankroll * 0.03, 2),
+        round(bankroll * 0.05, 2),
+    ]
+
+    # Guardar datos de la apuesta
+    context.user_data["quickbet_data"] = {
+        "match": bet["match"],
+        "pick": bet["pick"],
+        "odds": bet["odds"],
+    }
+
+    keyboard = [
+        [
+            InlineKeyboardButton(f"1% (${stakes[0]:.0f})", callback_data=f"qbstake_{stakes[0]}"),
+            InlineKeyboardButton(f"2% (${stakes[1]:.0f})", callback_data=f"qbstake_{stakes[1]}"),
+        ],
+        [
+            InlineKeyboardButton(f"3% (${stakes[2]:.0f})", callback_data=f"qbstake_{stakes[2]}"),
+            InlineKeyboardButton(f"5% (${stakes[3]:.0f})", callback_data=f"qbstake_{stakes[3]}"),
+        ],
+        [InlineKeyboardButton("❌ No apostar", callback_data="qbstake_cancel")],
+    ]
+
+    await query.edit_message_text(
+        f"💰 *{bet['match']}*\n"
+        f"🎯 {bet['pick']} @ {bet['odds']:.2f}\n"
+        f"💼 Bankroll: ${bankroll:.2f}\n\n"
+        f"¿Cuánto apuestas?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def quick_bet_stake_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirma la apuesta rápida con el stake seleccionado."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "qbstake_cancel":
+        await query.edit_message_text("👍 No se registró apuesta.")
+        return
+
+    stake = float(query.data.replace("qbstake_", ""))
+    data = context.user_data.pop("quickbet_data", None)
+
+    if not data:
+        await query.edit_message_text("❌ Datos de apuesta no encontrados.")
+        return
+
+    from src.models.database import add_user_bet, get_or_create_bankroll
+    user_id = query.from_user.id
+
+    br = await get_or_create_bankroll(user_id)
+    if stake > br["current_bankroll"]:
+        await query.edit_message_text(f"❌ Bankroll insuficiente (${br['current_bankroll']:.2f})")
+        return
+
+    bet_id = await add_user_bet(
+        user_id=user_id,
+        match_name=data["match"],
+        league="",
+        pick=data["pick"],
+        odds=data["odds"],
+        stake=stake,
+    )
+
+    br = await get_or_create_bankroll(user_id)
+    potential = stake * (data["odds"] - 1)
+
+    await query.edit_message_text(
+        f"✅ *APUESTA REGISTRADA* (#{bet_id})\n"
+        f"{'─' * 28}\n"
+        f"⚽ {data['match']}\n"
+        f"🎯 {data['pick']} @ {data['odds']:.2f}\n"
+        f"💰 Stake: ${stake:.2f}\n"
+        f"🎁 Ganancia potencial: +${potential:.2f}\n"
+        f"{'─' * 28}\n"
+        f"💼 Bankroll: *${br['current_bankroll']:.2f}*\n\n"
+        f"`/res gané la #{bet_id}` o `/res perdí la #{bet_id}`",
+        parse_mode="Markdown",
+    )
+
+
 async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -482,13 +616,12 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if use_fd and can_use_fd(league_id):
-            report = await run_fd_analysis(fixture, league_id)
+            report, bet_suggestions = await run_fd_analysis(fixture, league_id)
         else:
-            report = await run_full_analysis(fixture, league_id, season)
+            report, bet_suggestions = await run_full_analysis(fixture, league_id, season)
         logger.info(f"Análisis completado: {len(report)} chars")
-        # Guardar análisis para que /chat pueda referenciarlo
         context.user_data["last_analysis"] = report
-        # Telegram limita mensajes a 4096 chars
+
         if len(report) > 4096:
             parts = [report[i:i+4096] for i in range(0, len(report), 4096)]
             await query.edit_message_text(parts[0], parse_mode="Markdown")
@@ -496,6 +629,10 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(part, parse_mode="Markdown")
         else:
             await query.edit_message_text(report, parse_mode="Markdown")
+
+        # Mostrar botones de apuesta rápida si hay value bets
+        await _send_quick_bet_buttons(query.message, context, bet_suggestions)
+
     except Exception as e:
         logger.error(f"Analysis error: {e}", exc_info=True)
         await query.edit_message_text(f"❌ Error en el análisis: {e}")
@@ -659,7 +796,17 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     else:
         logger.info("Saltando análisis IA (no hay GROQ_API_KEY o servicio no inicializado)")
 
-    return report
+    # Guardar metadata para botones de apuesta rápida
+    match_name = f"{home_name} vs {away_name}"
+    bet_suggestions = []
+    for s in suggestions[:3]:
+        bet_suggestions.append({
+            "match": match_name,
+            "pick": s.pick,
+            "odds": round(s.odds, 2),
+        })
+
+    return report, bet_suggestions
 
 
 async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
@@ -770,7 +917,17 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
         else:
             logger.warning("[fullback] AI analysis retornó None")
 
-    return report
+    # Metadata para botones de apuesta rápida
+    match_name = f"{home_name} vs {away_name}"
+    bet_suggestions = []
+    for s in suggestions[:3]:
+        bet_suggestions.append({
+            "match": match_name,
+            "pick": s.pick,
+            "odds": round(s.odds, 2),
+        })
+
+    return report, bet_suggestions
 
 
 def _extract_embedded_odds(fixture: dict, home_name: str, away_name: str) -> dict:

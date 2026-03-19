@@ -28,6 +28,7 @@ from src.handlers.admin_handlers import (
 from src.handlers.analysis_handlers import (
     analyze_command, select_league, select_match,
     opportunities_command, cancel_analysis,
+    quick_bet_callback, quick_bet_stake_callback,
     SELECT_LEAGUE, SELECT_MATCH,
 )
 from src.handlers.bankroll_handlers import (
@@ -36,7 +37,7 @@ from src.handlers.bankroll_handlers import (
     resolve_bet_command, my_bets_command,
     rendimiento_command,
 )
-from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions
+from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions, auto_resolve_user_bets
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -111,7 +112,11 @@ def main():
     app.add_handler(CommandHandler("pendientes", pending_predictions_command))
     app.add_handler(CommandHandler("admin", admin_panel))
 
-    # Callback queries (botones inline)
+    # Callback queries específicos (antes del genérico)
+    app.add_handler(CallbackQueryHandler(quick_bet_callback, pattern=r"^quickbet_"))
+    app.add_handler(CallbackQueryHandler(quick_bet_stake_callback, pattern=r"^qbstake_"))
+
+    # Callback queries genérico (botones inline)
     app.add_handler(CallbackQueryHandler(button_callback))
 
     # Inicializar base de datos
@@ -135,8 +140,17 @@ def main():
         id="auto_resolve",
         name="Auto-resolver predicciones",
     )
+    # Auto-resolver apuestas de usuarios cada 2 horas
+    scheduler.add_job(
+        auto_resolve_user_bets,
+        "interval",
+        hours=2,
+        args=[app.bot],
+        id="auto_resolve_bets",
+        name="Auto-resolver apuestas de usuarios",
+    )
     scheduler.start()
-    logger.info("⏰ Scheduler: VIP check (9:00 diario) + Auto-resolve (cada 2h)")
+    logger.info("⏰ Scheduler: VIP check (9:00) + Auto-resolve predicciones (2h) + Auto-resolve apuestas (2h)")
 
     # Log de diagnóstico de API keys
     logger.info("═══ DIAGNÓSTICO DE API KEYS ═══")

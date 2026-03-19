@@ -1,10 +1,13 @@
 import logging
 from datetime import datetime, timedelta
 
-from src.config import ADMIN_ID, FOOTBALL_DATA_API_KEY
+import aiosqlite
+
+from src.config import ADMIN_ID, FOOTBALL_DATA_API_KEY, DB_PATH
 from src.models.database import (
     get_vip_users, remove_vip,
     get_pending_predictions, resolve_prediction,
+    resolve_user_bet,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,3 +242,158 @@ def _check_if_correct(pred, home_goals: int, away_goals: int) -> bool:
         "Local o Visitante (12)": actual in ("home_win", "away_win"),
     }
     return correct_map.get(pick, False)
+
+
+async def auto_resolve_user_bets(bot):
+    """Auto-resuelve apuestas de usuarios consultando resultados reales.
+
+    Busca apuestas pendientes, intenta encontrar el resultado real del partido
+    en football-data.org, y resuelve automáticamente. Notifica al usuario.
+
+    Se ejecuta cada 2 horas.
+    """
+    if not FOOTBALL_DATA_API_KEY:
+        return
+
+    from src.services.football_data_service import FootballDataService, COMPETITION_MAP
+
+    fd = FootballDataService(FOOTBALL_DATA_API_KEY)
+
+    # Obtener todas las apuestas pendientes de todos los usuarios
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM user_bets WHERE result = 'pending'
+               AND created_at <= datetime('now', '-2 hours')
+               ORDER BY created_at ASC LIMIT 50"""
+        ) as cursor:
+            pending_bets = [dict(r) for r in await cursor.fetchall()]
+
+    if not pending_bets:
+        return
+
+    logger.info(f"Auto-resolve user bets: {len(pending_bets)} pendientes")
+
+    # Obtener partidos terminados recientes (últimos 3 días) de todas las ligas
+    date_from = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    date_to = datetime.now().strftime("%Y-%m-%d")
+
+    all_finished = []
+    for league_id, comp_code in COMPETITION_MAP.items():
+        if not comp_code:
+            continue
+        try:
+            matches = await fd.get_finished_matches(comp_code, date_from, date_to)
+            all_finished.extend(matches)
+        except Exception as e:
+            logger.warning(f"Error obteniendo finalizados de {comp_code}: {e}")
+
+    if not all_finished:
+        return
+
+    resolved_count = 0
+
+    for bet in pending_bets:
+        match_name = bet["match_name"].lower()
+
+        # Buscar el partido en los resultados
+        for m in all_finished:
+            m_home = m.get("homeTeam", {}).get("name", "").lower()
+            m_away = m.get("awayTeam", {}).get("name", "").lower()
+
+            # Match por nombre
+            if not (_name_overlap(match_name, f"{m_home} {m_away}")):
+                continue
+
+            score = m.get("score", {}).get("fullTime", {})
+            home_goals = score.get("home")
+            away_goals = score.get("away")
+
+            if home_goals is None or away_goals is None:
+                continue
+
+            # Determinar si la apuesta ganó
+            result = _evaluate_user_bet(bet["pick"], home_goals, away_goals)
+            if not result:
+                continue
+
+            res = await resolve_user_bet(bet["id"], result)
+            if res:
+                resolved_count += 1
+                profit = res["profit"]
+                sign = "+" if profit >= 0 else ""
+                emoji = "✅🎉" if result == "win" else "❌"
+
+                # Notificar al usuario
+                try:
+                    await bot.send_message(
+                        chat_id=bet["user_id"],
+                        text=(
+                            f"{emoji} *APUESTA #{bet['id']} AUTO-RESUELTA*\n"
+                            f"{'─' * 28}\n"
+                            f"⚽ {bet['match_name']} ({home_goals}-{away_goals})\n"
+                            f"🎯 {bet['pick']} @ {bet['odds']:.2f}\n"
+                            f"📊 P&L: *{sign}${profit:.2f}*\n"
+                            f"{'─' * 28}\n"
+                            f"_Resultado detectado automáticamente_"
+                        ),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+
+            break  # Ya encontró el partido, pasar a la siguiente apuesta
+
+    if resolved_count > 0:
+        logger.info(f"Auto-resolve user bets: {resolved_count} apuestas resueltas")
+
+
+def _evaluate_user_bet(pick: str, home_goals: int, away_goals: int) -> str | None:
+    """Evalúa si una apuesta del usuario ganó o perdió.
+
+    Returns: "win", "loss", o None si no puede determinar.
+    """
+    pick_lower = pick.lower()
+    total = home_goals + away_goals
+
+    # Mapeo de picks comunes
+    checks = {
+        # Victoria
+        "victoria local": home_goals > away_goals,
+        "gana local": home_goals > away_goals,
+        "gana el local": home_goals > away_goals,
+        "victoria visitante": home_goals < away_goals,
+        "gana visitante": home_goals < away_goals,
+        "gana el visitante": home_goals < away_goals,
+        "empate": home_goals == away_goals,
+        # Over/Under
+        "over 0.5": total > 0.5,
+        "over 1.5": total > 1.5,
+        "over 2.5": total > 2.5,
+        "over 3.5": total > 3.5,
+        "under 0.5": total < 0.5,
+        "under 1.5": total < 1.5,
+        "under 2.5": total < 2.5,
+        "under 3.5": total < 3.5,
+        # BTTS
+        "btts": home_goals > 0 and away_goals > 0,
+        "ambos marcan": home_goals > 0 and away_goals > 0,
+        "btts sí": home_goals > 0 and away_goals > 0,
+        "btts no": home_goals == 0 or away_goals == 0,
+        "ambos marcan - sí": home_goals > 0 and away_goals > 0,
+        "ambos marcan - no": home_goals == 0 or away_goals == 0,
+        # Doble oportunidad
+        "1x": home_goals >= away_goals,
+        "local o empate": home_goals >= away_goals,
+        "x2": home_goals <= away_goals,
+        "visitante o empate": home_goals <= away_goals,
+        "12": home_goals != away_goals,
+        "local o visitante": home_goals != away_goals,
+    }
+
+    for key, is_win in checks.items():
+        if key in pick_lower:
+            return "win" if is_win else "loss"
+
+    # Si no se pudo evaluar, no resolver automáticamente
+    return None
