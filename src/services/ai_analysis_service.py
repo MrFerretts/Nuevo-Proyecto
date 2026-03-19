@@ -224,3 +224,17 @@ Responde en español con este formato (máximo 500 caracteres):
 Sé breve y directo. No repitas los datos, solo da tu veredicto."""
 
         return await self._call_groq(prompt, max_tokens=500)
+
+    async def chat(self, user_message: str) -> str | None:
+        """Responde una pregunta libre del usuario sobre fútbol/apuestas."""
+        if not self.api_key:
+            return None
+
+        prompt = f"""Eres un asistente experto en fútbol y apuestas deportivas.
+Responde en español, de forma concisa y útil. Si te preguntan sobre un partido,
+da tu opinión basada en tu conocimiento. Si no sabes algo, dilo honestamente.
+Máximo 1000 caracteres en tu respuesta. Usa emojis con moderación.
+
+Pregunta del usuario: {user_message}"""
+
+        return await self._call_groq(prompt, max_tokens=600)

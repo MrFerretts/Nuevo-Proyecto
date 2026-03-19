@@ -1,10 +1,15 @@
+import logging
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from src.config import VIP_PRICE, PAYMENT_LINK, SPORTS
+from src.config import VIP_PRICE, PAYMENT_LINK, SPORTS, GROQ_API_KEY
 from src.models.database import add_user, get_user, get_stats, get_recent_tips
 from src.services.odds_service import get_upcoming_games, format_games_list
+from src.services.ai_analysis_service import AIAnalysisService
 from src.utils.formatters import format_tip, format_stats
+
+logger = logging.getLogger(__name__)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -40,7 +45,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 *COMANDOS DISPONIBLES*\n\n"
         "🔬 *Análisis:*\n"
         "/analizar - Análisis completo de un partido\n"
-        "/oportunidades - Escanear ligas buscando value bets\n\n"
+        "/oportunidades - Escanear ligas buscando value bets\n"
+        "/chat - Pregunta lo que quieras a la IA\n\n"
         "👤 *General:*\n"
         "/start - Iniciar el bot\n"
         "/stats - Estadísticas del canal\n"
@@ -178,3 +184,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Luego envía comprobante al admin."
             )
         await query.edit_message_text(text, parse_mode="Markdown")
+
+
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permite al usuario hacer preguntas libres a la IA. Uso: /chat <pregunta>"""
+    if not GROQ_API_KEY:
+        await update.message.reply_text(
+            "❌ La IA no está configurada. Falta GROQ\\_API\\_KEY en .env",
+            parse_mode="Markdown",
+        )
+        return
+
+    user_text = " ".join(context.args) if context.args else ""
+    if not user_text:
+        await update.message.reply_text(
+            "🤖 *Chat con IA*\n\n"
+            "Escribe tu pregunta después del comando.\n"
+            "Ejemplo: `/chat ¿Cómo va el Barcelona esta temporada?`",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("🤖 Pensando...")
+
+    try:
+        ai = AIAnalysisService(GROQ_API_KEY)
+        response = await ai.chat(user_text)
+
+        if response:
+            await msg.edit_text(f"🤖 *IA*\n\n{response}", parse_mode="Markdown")
+        else:
+            await msg.edit_text("❌ No pude obtener una respuesta. Intenta de nuevo.")
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        await msg.edit_text("❌ Error al procesar tu pregunta. Intenta de nuevo.")

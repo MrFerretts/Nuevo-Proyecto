@@ -15,7 +15,7 @@ from src.config import BOT_TOKEN, ADMIN_ID, GROQ_API_KEY, FOOTBALL_DATA_API_KEY,
 from src.models.database import init_db
 from src.handlers.user_handlers import (
     start, help_command, stats_command, tips_command,
-    games_command, vip_info, button_callback,
+    games_command, vip_info, button_callback, chat_command,
 )
 from src.handlers.admin_handlers import (
     new_tip, tip_sport, tip_match, tip_prediction,
@@ -70,6 +70,7 @@ def main():
     app.add_handler(CommandHandler("tips", tips_command))
     app.add_handler(CommandHandler("partidos", games_command))
     app.add_handler(CommandHandler("vip", vip_info))
+    app.add_handler(CommandHandler("chat", chat_command))
 
     # Conversation handler para análisis
     analysis_conv = ConversationHandler(

@@ -197,7 +197,7 @@ class FootballStatsService:
         return results or []
 
 
-# IDs de ligas populares en API-Football
+# IDs de ligas soportadas por football-data.org (plan gratuito)
 LEAGUE_IDS = {
     "premier_league": 39,
     "la_liga": 140,
@@ -205,10 +205,6 @@ LEAGUE_IDS = {
     "bundesliga": 78,
     "ligue_1": 61,
     "champions_league": 2,
-    "europa_league": 3,
-    "liga_mx": 262,
-    "mls": 253,
-    "copa_libertadores": 13,
 }
 
 LEAGUE_NAMES = {
@@ -218,10 +214,6 @@ LEAGUE_NAMES = {
     78: "Bundesliga",
     61: "Ligue 1",
     2: "Champions League",
-    3: "Europa League",
-    262: "Liga MX",
-    253: "MLS",
-    13: "Copa Libertadores",
 }
 
 # Mapeo de league_id (API-Football) a sport_key (The Odds API)
@@ -232,8 +224,4 @@ LEAGUE_TO_ODDS_SPORT = {
     78: "soccer_germany_bundesliga",
     61: "soccer_france_ligue_one",
     2: "soccer_uefa_champs_league",
-    3: "soccer_uefa_europa_league",
-    262: "soccer_mexico_ligamx",
-    253: "soccer_usa_mls",
-    13: "soccer_conmebol_copa_libertadores",
 }
