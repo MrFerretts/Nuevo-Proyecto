@@ -411,9 +411,21 @@ async def rendimiento_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ══════════════════════════════════════════════════════════════
 
 async def resolve_bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resuelve una apuesta. Uso: /resultado_apuesta <id> <win|loss|void>"""
-    if len(context.args) < 2:
-        user_id = update.effective_user.id
+    """Resuelve apuestas con lenguaje natural o formato clásico.
+
+    Ejemplos naturales:
+      /resultado gané la del barca
+      /resultado perdí el over del liverpool
+      /resultado se canceló la del juve
+
+    Formato clásico también funciona:
+      /resultado 3 win
+    """
+    user_id = update.effective_user.id
+    user_text = " ".join(context.args) if context.args else ""
+
+    if not user_text:
+        # Sin argumentos: mostrar pendientes
         pending = await get_user_pending_bets(user_id)
         if not pending:
             await update.message.reply_text("📭 No tienes apuestas pendientes.")
@@ -425,23 +437,91 @@ async def resolve_bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"*#{bet['id']}* - {bet['match_name']}\n"
                 f"  🎯 {bet['pick']} @ {bet['odds']:.2f} | 💰 ${bet['stake']:.2f}\n\n"
             )
-        text += "_Usa: `/resultado_apuesta <id> win/loss/void`_"
+        text += (
+            "_Dime el resultado como quieras:_\n"
+            "`/resultado gané la del barca`\n"
+            "`/resultado perdí el over del liverpool`\n"
+            "`/resultado 3 win`"
+        )
         await update.message.reply_text(text, parse_mode="Markdown")
         return
 
-    try:
-        bet_id = int(context.args[0])
-        result = context.args[1].lower()
-        if result not in ("win", "loss", "void"):
-            raise ValueError
-    except (ValueError, IndexError):
+    # Intentar formato clásico primero: /resultado <id> <win|loss|void>
+    if len(context.args) == 2:
+        try:
+            bet_id = int(context.args[0])
+            result = context.args[1].lower()
+            if result in ("win", "loss", "void"):
+                await _resolve_and_reply(update, bet_id, result)
+                return
+        except ValueError:
+            pass  # No es formato clásico, intentar con IA
+
+    # Lenguaje natural con Groq
+    pending = await get_user_pending_bets(user_id)
+    if not pending:
+        await update.message.reply_text("📭 No tienes apuestas pendientes.")
+        return
+
+    if not GROQ_API_KEY:
         await update.message.reply_text(
-            "❌ Uso: `/resultado_apuesta 1 win`\n"
-            "Opciones: `win`, `loss`, `void`",
+            "❌ Usa el formato: `/resultado <id> win/loss/void`",
             parse_mode="Markdown",
         )
         return
 
+    msg = await update.message.reply_text("🤖 Entendiendo...")
+
+    ai = AIAnalysisService(GROQ_API_KEY)
+    parsed = await ai.parse_result(user_text, pending)
+
+    if not parsed or "error" in parsed:
+        error = parsed.get("error", "No entendí") if parsed else "Error de conexión"
+        await msg.edit_text(
+            f"❌ {error}\n\n"
+            f"Apuestas pendientes:\n" +
+            "\n".join(f"  #{b['id']}: {b['match_name']} - {b['pick']}" for b in pending) +
+            "\n\n_Intenta: `/resultado gané la del barca`_",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Resolver múltiples apuestas
+    if "bets" in parsed:
+        results_text = ""
+        for item in parsed["bets"]:
+            bet_id = item.get("bet_id")
+            result = item.get("result", "").lower()
+            if bet_id and result in ("win", "loss", "void"):
+                res = await resolve_user_bet(bet_id, result)
+                if res:
+                    p = res["profit"]
+                    sign = "+" if p >= 0 else ""
+                    emoji = {"win": "✅", "loss": "❌", "void": "↩️"}.get(result, "")
+                    results_text += f"{emoji} #{bet_id} {res['bet']['match_name']}: {sign}${p:.2f}\n"
+
+        br = await get_or_create_bankroll(user_id)
+        await msg.edit_text(
+            f"📊 *RESULTADOS ACTUALIZADOS*\n{'─' * 28}\n{results_text}\n"
+            f"💼 Bankroll: *${br['current_bankroll']:.2f}*",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Resolver una sola apuesta
+    bet_id = parsed.get("bet_id")
+    result = (parsed.get("result") or "").lower()
+
+    if not bet_id or result not in ("win", "loss", "void"):
+        await msg.edit_text("❌ No pude determinar el resultado. Intenta de nuevo.")
+        return
+
+    await msg.delete()
+    await _resolve_and_reply(update, bet_id, result)
+
+
+async def _resolve_and_reply(update: Update, bet_id: int, result: str):
+    """Resuelve una apuesta y envía la respuesta."""
     res = await resolve_user_bet(bet_id, result)
     if not res:
         await update.message.reply_text("❌ Apuesta no encontrada.")

@@ -303,3 +303,85 @@ Si no puedes identificar al menos el pick, responde: {{"error": "No entendí tu 
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Groq parse_bet: JSON inválido: {result[:200]} - {e}")
             return None
+
+    def _clean_json(self, text: str) -> dict | None:
+        """Limpia y parsea JSON de respuestas de Groq."""
+        try:
+            cleaned = text.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+            return json.loads(cleaned.strip())
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Groq: JSON inválido: {text[:200]} - {e}")
+            return None
+
+    async def parse_result(self, user_message: str, pending_bets: list[dict]) -> dict | None:
+        """Parsea el resultado de una apuesta desde lenguaje natural.
+
+        Ejemplo: "gané la del barca" → {"bet_id": 3, "result": "win"}
+        """
+        if not self.api_key or not pending_bets:
+            return None
+
+        bets_text = "\n".join(
+            f"- ID #{b['id']}: {b['match_name']} | {b['pick']} @ {b['odds']:.2f} | ${b['stake']:.2f}"
+            for b in pending_bets
+        )
+
+        prompt = f"""Eres un parser. El usuario describe el resultado de una apuesta en lenguaje natural.
+Tienes estas apuestas PENDIENTES del usuario:
+
+{bets_text}
+
+REGLAS:
+- Identifica a cuál apuesta se refiere el usuario (por equipo, tipo de apuesta, etc.)
+- Identifica el resultado: "gané", "acerté", "entró", "sí cayó" = win | "perdí", "no entró", "falló" = loss | "suspendido", "cancelado", "void" = void
+- Si dice "todas" o "las dos", devuelve una lista con múltiples resultados.
+
+MENSAJE DEL USUARIO: {user_message}
+
+Responde ÚNICAMENTE con JSON válido (sin markdown, sin ```):
+Para una apuesta: {{"bet_id": 3, "result": "win"}}
+Para varias: {{"bets": [{{"bet_id": 3, "result": "win"}}, {{"bet_id": 5, "result": "loss"}}]}}
+Si no puedes identificar la apuesta: {{"error": "No identifiqué la apuesta"}}"""
+
+        result = await self._call_groq(prompt, max_tokens=200)
+        if not result:
+            return None
+        return self._clean_json(result)
+
+    async def parse_match_query(self, user_message: str, available_matches: list[dict]) -> dict | None:
+        """Identifica qué partido quiere analizar el usuario.
+
+        Ejemplo: "el del barca" → {"match_index": 2, "league_id": 140}
+        """
+        if not self.api_key or not available_matches:
+            return None
+
+        matches_text = "\n".join(
+            f"- índice {m['index']}: {m['home']} vs {m['away']} (liga_id: {m['league_id']}, {m['league_name']})"
+            for m in available_matches
+        )
+
+        prompt = f"""Eres un parser. El usuario quiere analizar un partido de fútbol.
+Estos son los próximos partidos disponibles:
+
+{matches_text}
+
+REGLAS:
+- Identifica el partido al que se refiere el usuario. Puede usar abreviaciones como "barca", "man u", "juve", "liverpool", etc.
+- Si menciona un equipo, busca en qué partido juega ese equipo.
+- Si menciona dos equipos, busca el partido entre ellos.
+
+MENSAJE DEL USUARIO: {user_message}
+
+Responde ÚNICAMENTE con JSON válido (sin markdown, sin ```):
+{{"match_index": 2, "league_id": 140}}
+Si no encuentras el partido: {{"error": "No encontré ese partido"}}"""
+
+        result = await self._call_groq(prompt, max_tokens=100)
+        if not result:
+            return None
+        return self._clean_json(result)

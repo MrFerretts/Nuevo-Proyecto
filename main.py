@@ -84,6 +84,7 @@ def main():
     app.add_handler(CommandHandler("apostar", bet_command))
     app.add_handler(CommandHandler("misapuestas", my_bets_command))
     app.add_handler(CommandHandler("resultado_apuesta", resolve_bet_command))
+    app.add_handler(CommandHandler("res", resolve_bet_command))
     app.add_handler(CommandHandler("rendimiento", rendimiento_command))
     app.add_handler(CallbackQueryHandler(confirm_bet_callback, pattern=r"^confirmbet_"))
 

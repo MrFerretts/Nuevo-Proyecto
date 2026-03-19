@@ -238,7 +238,13 @@ def _team_name_matches(search: str, name: str, short: str, tla: str) -> bool:
 
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el análisis de un partido. Uso: /analizar"""
+    """Inicia el análisis de un partido. Acepta texto directo o menú.
+
+    Ejemplos:
+      /analizar                    → muestra menú de ligas
+      /analizar barca vs sevilla   → busca el partido directamente
+      /analizar el del liverpool   → busca partido del Liverpool
+    """
     if not FOOTBALL_API_KEY and not FOOTBALL_DATA_API_KEY:
         await update.message.reply_text(
             "❌ *Necesitas al menos una API key de estadísticas*\n\n"
@@ -250,6 +256,69 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    user_text = " ".join(context.args) if context.args else ""
+
+    # Si el usuario escribió algo, intentar buscar el partido directamente con IA
+    if user_text and GROQ_API_KEY:
+        msg = await update.message.reply_text("🔬 Buscando partido...")
+
+        # Cargar partidos de todas las ligas
+        all_matches = await _load_all_upcoming_matches()
+
+        if not all_matches:
+            await msg.edit_text("❌ No se pudieron obtener los próximos partidos. Intenta con el menú: /analizar")
+            return ConversationHandler.END
+
+        ai = AIAnalysisService(GROQ_API_KEY)
+        parsed = await ai.parse_match_query(user_text, all_matches)
+
+        if parsed and "match_index" in parsed:
+            match_info = None
+            for m in all_matches:
+                if m["index"] == parsed["match_index"]:
+                    match_info = m
+                    break
+
+            if match_info:
+                league_id = match_info["league_id"]
+                fixture = match_info["fixture_data"]
+                use_fd = match_info.get("use_fd", False)
+                season = _get_current_season()
+
+                context.user_data["analysis_league_id"] = league_id
+                context.user_data["analysis_season"] = season
+                context.user_data["analysis_use_fd"] = use_fd
+
+                home = fixture.get("teams", {}).get("home", {}).get("name", "?")
+                away = fixture.get("teams", {}).get("away", {}).get("name", "?")
+                await msg.edit_text(f"🔬 Analizando *{home} vs {away}*...", parse_mode="Markdown")
+
+                try:
+                    if use_fd and can_use_fd(league_id):
+                        report = await run_fd_analysis(fixture, league_id)
+                    else:
+                        report = await run_full_analysis(fixture, league_id, season)
+
+                    context.user_data["last_analysis"] = report
+
+                    if len(report) > 4096:
+                        parts = [report[i:i+4096] for i in range(0, len(report), 4096)]
+                        await msg.edit_text(parts[0], parse_mode="Markdown")
+                        for part in parts[1:]:
+                            await update.message.reply_text(part, parse_mode="Markdown")
+                    else:
+                        await msg.edit_text(report, parse_mode="Markdown")
+                except Exception as e:
+                    logger.error(f"Analysis error: {e}", exc_info=True)
+                    await msg.edit_text(f"❌ Error en el análisis: {e}")
+
+                return ConversationHandler.END
+
+        # No encontró el partido, mostrar menú normal
+        await msg.edit_text("🤔 No encontré ese partido. Te muestro las ligas disponibles:")
+        # Fall through al menú de ligas...
+
+    # Menú de ligas (comportamiento original)
     keyboard = []
     row = []
     for key, name in sorted(LEAGUE_NAMES.items(), key=lambda x: x[1]):
@@ -260,13 +329,56 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row:
         keyboard.append(row)
 
+    if not user_text:
+        header = (
+            "🔬 *ANALIZAR PARTIDO*\n\n"
+            "Puedes escribir directo:\n"
+            "`/analizar barca vs sevilla`\n"
+            "`/analizar el del liverpool`\n\n"
+            "O selecciona la liga:"
+        )
+    else:
+        header = "🔬 *ANALIZAR PARTIDO*\n\nSelecciona la liga:"
+
     await update.message.reply_text(
-        "🔬 *ANALIZAR PARTIDO*\n\n"
-        "Selecciona la liga:",
+        header,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
     return SELECT_LEAGUE
+
+
+async def _load_all_upcoming_matches() -> list:
+    """Carga próximos partidos de todas las ligas para búsqueda con IA."""
+    all_matches = []
+    idx = 0
+
+    for league_id, league_name in LEAGUE_NAMES.items():
+        try:
+            if can_use_fd(league_id):
+                fd = get_fd_service()
+                comp_code = COMPETITION_MAP[league_id]
+                fd_matches = await fd.get_upcoming_matches(comp_code, limit=5)
+                if fd_matches:
+                    fixtures = _convert_fd_fixtures(fd_matches)
+                    for fx in fixtures:
+                        home = fx.get("teams", {}).get("home", {}).get("name", "?")
+                        away = fx.get("teams", {}).get("away", {}).get("name", "?")
+                        all_matches.append({
+                            "index": idx,
+                            "home": home,
+                            "away": away,
+                            "league_id": league_id,
+                            "league_name": league_name,
+                            "fixture_data": fx,
+                            "use_fd": True,
+                        })
+                        idx += 1
+        except Exception as e:
+            logger.warning(f"Error cargando partidos de {league_name}: {e}")
+            continue
+
+    return all_matches
 
 
 async def select_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
