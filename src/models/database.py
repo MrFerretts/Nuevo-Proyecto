@@ -76,6 +76,36 @@ async def init_db():
                 await db.execute(f"ALTER TABLE predictions ADD COLUMN {col} {coltype}")
             except Exception:
                 pass  # Ya existe
+
+        # Tabla de bankroll / apuestas del usuario
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                match_name TEXT NOT NULL,
+                league TEXT DEFAULT '',
+                pick TEXT NOT NULL,
+                odds REAL NOT NULL,
+                stake REAL NOT NULL,
+                estimated_prob REAL DEFAULT 0,
+                edge REAL DEFAULT 0,
+                kelly_stake REAL DEFAULT 0,
+                result TEXT DEFAULT 'pending',
+                profit REAL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_bankroll (
+                user_id INTEGER PRIMARY KEY,
+                initial_bankroll REAL DEFAULT 1000,
+                current_bankroll REAL DEFAULT 1000,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         await db.commit()
 
 
@@ -416,3 +446,145 @@ async def get_pending_predictions(limit: int = 20) -> list:
             (limit,),
         ) as cursor:
             return await cursor.fetchall()
+
+
+# ══════════════════════════════════════════════════════════════════
+# BANKROLL TRACKER
+# ══════════════════════════════════════════════════════════════════
+
+async def get_or_create_bankroll(user_id: int, initial: float = 1000.0) -> dict:
+    """Obtiene o crea el bankroll de un usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_bankroll WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            return dict(row)
+        await db.execute(
+            "INSERT INTO user_bankroll (user_id, initial_bankroll, current_bankroll) VALUES (?, ?, ?)",
+            (user_id, initial, initial),
+        )
+        await db.commit()
+        return {"user_id": user_id, "initial_bankroll": initial, "current_bankroll": initial}
+
+
+async def update_bankroll(user_id: int, amount: float):
+    """Suma o resta al bankroll actual."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE user_bankroll SET current_bankroll = current_bankroll + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+            (amount, user_id),
+        )
+        await db.commit()
+
+
+async def set_bankroll(user_id: int, amount: float):
+    """Establece el bankroll a un monto específico."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE user_bankroll SET current_bankroll = ?, initial_bankroll = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+            (amount, amount, user_id),
+        )
+        await db.commit()
+
+
+async def add_user_bet(user_id: int, match_name: str, league: str, pick: str,
+                       odds: float, stake: float, estimated_prob: float = 0,
+                       edge: float = 0, kelly_stake: float = 0) -> int:
+    """Registra una apuesta del usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO user_bets
+               (user_id, match_name, league, pick, odds, stake,
+                estimated_prob, edge, kelly_stake)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, match_name, league, pick, odds, stake,
+             estimated_prob, edge, kelly_stake),
+        )
+        # Restar stake del bankroll
+        await db.execute(
+            "UPDATE user_bankroll SET current_bankroll = current_bankroll - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+            (stake, user_id),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def resolve_user_bet(bet_id: int, result: str):
+    """Resuelve una apuesta: win, loss, void."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM user_bets WHERE id = ?", (bet_id,)) as cursor:
+            bet = await cursor.fetchone()
+        if not bet:
+            return None
+
+        if result == "win":
+            profit = bet["stake"] * (bet["odds"] - 1)
+            returned = bet["stake"] + profit
+        elif result == "void":
+            profit = 0
+            returned = bet["stake"]
+        else:  # loss
+            profit = -bet["stake"]
+            returned = 0
+
+        await db.execute(
+            "UPDATE user_bets SET result = ?, profit = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (result, profit, bet_id),
+        )
+        # Devolver al bankroll lo que corresponda
+        if returned > 0:
+            await db.execute(
+                "UPDATE user_bankroll SET current_bankroll = current_bankroll + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (returned, bet["user_id"]),
+            )
+        await db.commit()
+        return {"profit": profit, "returned": returned, "bet": dict(bet)}
+
+
+async def get_user_bets(user_id: int, limit: int = 20) -> list:
+    """Obtiene las últimas apuestas del usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_bets WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_user_pending_bets(user_id: int) -> list:
+    """Obtiene apuestas pendientes del usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_bets WHERE user_id = ? AND result = 'pending' ORDER BY created_at DESC",
+            (user_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_user_bet_stats(user_id: int) -> dict:
+    """Estadísticas completas de apuestas del usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) as voids,
+                SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN result != 'pending' THEN profit ELSE 0 END) as total_profit,
+                SUM(CASE WHEN result != 'pending' THEN stake ELSE 0 END) as total_staked,
+                AVG(CASE WHEN result != 'pending' THEN odds ELSE NULL END) as avg_odds,
+                MAX(CASE WHEN result = 'win' THEN profit ELSE 0 END) as best_win,
+                MIN(CASE WHEN result = 'loss' THEN profit ELSE 0 END) as worst_loss
+            FROM user_bets WHERE user_id = ?""",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else {}

@@ -19,7 +19,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔬 Analizar Partido", callback_data="analizar"),
          InlineKeyboardButton("🔍 Oportunidades", callback_data="oportunidades")],
-        [InlineKeyboardButton("📊 Estadísticas", callback_data="stats"),
+        [InlineKeyboardButton("💼 Mi Bankroll", callback_data="bankroll"),
          InlineKeyboardButton("🏟 Partidos", callback_data="games")],
         [InlineKeyboardButton("📋 Últimos Tips", callback_data="tips"),
          InlineKeyboardButton("👑 VIP", callback_data="vip_info")],
@@ -47,6 +47,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/analizar - Análisis completo de un partido\n"
         "/oportunidades - Escanear ligas buscando value bets\n"
         "/chat - Pregunta lo que quieras a la IA\n\n"
+        "💼 *Bankroll:*\n"
+        "/bankroll - Ver tu bankroll y ROI\n"
+        "/apostar - Registrar una apuesta\n"
+        "/misapuestas - Historial de apuestas\n"
+        "/resultado\\_apuesta - Resolver apuesta (win/loss)\n"
+        "/kelly - Calcular stake óptimo (Kelly)\n"
+        "/setbankroll - Establecer bankroll inicial\n\n"
         "👤 *General:*\n"
         "/start - Iniciar el bot\n"
         "/stats - Estadísticas del canal\n"
@@ -124,7 +131,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "analizar":
+    if query.data == "bankroll":
+        await query.edit_message_text(
+            "💼 Usa /bankroll para ver tu estado financiero.\n\n"
+            "Comandos útiles:\n"
+            "• /setbankroll 500 - Establecer bankroll\n"
+            "• /apostar - Registrar apuesta\n"
+            "• /kelly 2.10 55 - Calcular stake óptimo"
+        )
+        return
+
+    elif query.data == "analizar":
         await query.edit_message_text(
             "🔬 Usa el comando /analizar para analizar un partido.\n\n"
             "Te mostrará las ligas disponibles, seleccionas una, "
