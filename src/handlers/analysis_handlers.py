@@ -409,6 +409,7 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
 
     # Análisis con IA (si está configurado)
     ai = get_ai_service()
+    logger.info(f"AI service disponible: {ai is not None}, GROQ_API_KEY configurada: {bool(GROQ_API_KEY)}")
     if ai:
         league_name = LEAGUE_NAMES.get(league_id, "")
         ai_text = await ai.generate_ai_analysis(
@@ -416,6 +417,10 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
         )
         if ai_text:
             report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        else:
+            logger.warning("AI analysis retornó None - revisa logs de Groq arriba")
+    else:
+        logger.info("Saltando análisis IA (no hay GROQ_API_KEY o servicio no inicializado)")
 
     return report
 
@@ -487,6 +492,7 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
     # Análisis con IA (si está configurado)
     ai = get_ai_service()
+    logger.info(f"[fullback] AI service disponible: {ai is not None}")
     if ai:
         league_name = LEAGUE_NAMES.get(league_id, "")
         ai_text = await ai.generate_ai_analysis(
@@ -494,6 +500,8 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
         )
         if ai_text:
             report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        else:
+            logger.warning("[fullback] AI analysis retornó None")
 
     return report
 

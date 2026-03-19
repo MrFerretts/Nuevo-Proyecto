@@ -11,6 +11,7 @@ contextuales que el modelo Poisson no puede captar:
 Requiere: GROQ_API_KEY en .env (gratis en https://console.groq.com/)
 """
 
+import json
 import logging
 
 import aiohttp
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"
 
 
 class AIAnalysisService:
@@ -30,35 +32,57 @@ class AIAnalysisService:
         self.api_key = api_key
 
     async def _call_groq(self, prompt: str, max_tokens: int = 800) -> str | None:
-        """Hace una llamada a la API de Groq (compatible con OpenAI)."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": GROQ_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.7,
-                }
+        """Hace una llamada a la API de Groq (compatible con OpenAI).
 
-                async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
-                    if resp.status != 200:
-                        error = await resp.text()
-                        logger.error(f"Groq API error {resp.status}: {error[:200]}")
-                        return None
+        Intenta con el modelo principal, si falla intenta con el fallback.
+        """
+        for model in [GROQ_MODEL, GROQ_MODEL_FALLBACK]:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.7,
+                    }
 
-                    data = await resp.json()
-                    choices = data.get("choices", [])
-                    if choices:
-                        return choices[0].get("message", {}).get("content")
-                    return None
+                    logger.info(f"Groq: llamando modelo {model}...")
+                    async with session.post(GROQ_API_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        body = await resp.text()
+                        if resp.status == 401:
+                            logger.error(f"Groq: API KEY INVÁLIDA (401). Verifica GROQ_API_KEY en .env")
+                            return None
+                        if resp.status == 429:
+                            logger.warning(f"Groq: Rate limit alcanzado (429). Intentando modelo fallback...")
+                            continue
+                        if resp.status != 200:
+                            logger.error(f"Groq API error {resp.status} con {model}: {body[:300]}")
+                            continue
 
-        except Exception as e:
-            logger.error(f"Error en Groq API: {e}")
-            return None
+                        data = json.loads(body)
+                        choices = data.get("choices", [])
+                        if choices:
+                            text = choices[0].get("message", {}).get("content")
+                            if text:
+                                logger.info(f"Groq: respuesta OK de {model} ({len(text)} chars)")
+                                return text
+
+                        logger.warning(f"Groq: respuesta vacía de {model}: {body[:200]}")
+                        continue
+
+            except aiohttp.ClientError as e:
+                logger.error(f"Groq: error de conexión con {model}: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"Groq: error inesperado con {model}: {e}", exc_info=True)
+                continue
+
+        logger.error("Groq: todos los modelos fallaron")
+        return None
 
     async def generate_ai_analysis(
         self,
@@ -74,10 +98,17 @@ class AIAnalysisService:
         Returns: Texto con el análisis de IA, o None si falla.
         """
         if not self.api_key:
+            logger.warning("Groq: no hay API key configurada, saltando análisis IA")
             return None
 
+        logger.info(f"Groq: generando análisis IA para {home.name} vs {away.name}...")
         prompt = self._build_prompt(home, away, h2h, probs, suggestions, league_name)
-        return await self._call_groq(prompt, max_tokens=800)
+        result = await self._call_groq(prompt, max_tokens=800)
+        if result:
+            logger.info(f"Groq: análisis generado OK ({len(result)} chars)")
+        else:
+            logger.warning("Groq: no se pudo generar análisis IA")
+        return result
 
     def _build_prompt(
         self,
