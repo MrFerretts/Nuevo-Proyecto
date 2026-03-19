@@ -225,16 +225,29 @@ Sé breve y directo. No repitas los datos, solo da tu veredicto."""
 
         return await self._call_groq(prompt, max_tokens=500)
 
-    async def chat(self, user_message: str) -> str | None:
+    async def chat(self, user_message: str, last_analysis: str = "") -> str | None:
         """Responde una pregunta libre del usuario sobre fútbol/apuestas."""
         if not self.api_key:
             return None
 
-        prompt = f"""Eres un asistente experto en fútbol y apuestas deportivas.
-Responde en español, de forma concisa y útil. Si te preguntan sobre un partido,
-da tu opinión basada en tu conocimiento. Si no sabes algo, dilo honestamente.
-Máximo 1000 caracteres en tu respuesta. Usa emojis con moderación.
+        context_block = ""
+        if last_analysis:
+            # Limitar a 2000 chars para no saturar el prompt
+            trimmed = last_analysis[:2000]
+            context_block = f"""
+CONTEXTO - Último análisis generado por el bot:
+{trimmed}
+{"[...recortado]" if len(last_analysis) > 2000 else ""}
 
+Usa este análisis como referencia si el usuario pregunta sobre el partido, las probabilidades, value bets o cualquier dato del análisis.
+"""
+
+        prompt = f"""Eres un asistente experto en fútbol y apuestas deportivas integrado en un bot de Telegram.
+Responde en español, de forma concisa y útil. Si te preguntan sobre un partido,
+da tu opinión basada en tu conocimiento y en el contexto disponible.
+Si no sabes algo, dilo honestamente.
+Máximo 1000 caracteres en tu respuesta. Usa emojis con moderación.
+{context_block}
 Pregunta del usuario: {user_message}"""
 
         return await self._call_groq(prompt, max_tokens=600)

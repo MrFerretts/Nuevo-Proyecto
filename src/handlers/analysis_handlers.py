@@ -374,6 +374,8 @@ async def select_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             report = await run_full_analysis(fixture, league_id, season)
         logger.info(f"Análisis completado: {len(report)} chars")
+        # Guardar análisis para que /chat pueda referenciarlo
+        context.user_data["last_analysis"] = report
         # Telegram limita mensajes a 4096 chars
         if len(report) > 4096:
             parts = [report[i:i+4096] for i in range(0, len(report), 4096)]

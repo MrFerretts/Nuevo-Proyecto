@@ -209,7 +209,8 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         ai = AIAnalysisService(GROQ_API_KEY)
-        response = await ai.chat(user_text)
+        last_analysis = context.user_data.get("last_analysis", "")
+        response = await ai.chat(user_text, last_analysis=last_analysis)
 
         if response:
             await msg.edit_text(f"🤖 *IA*\n\n{response}", parse_mode="Markdown")
