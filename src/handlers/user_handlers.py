@@ -54,6 +54,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  _ej: /apostar 50 al man u over 1.5, x3_\n"
         "/res - Resultado de apuesta\n"
         "  _ej: /res gané la del barca_\n"
+        "/parlay - Apuesta combinada\n"
+        "  _ej: /parlay barca x1.85 + liverpool over 2.5 x2.10, 50_\n"
         "/misapuestas - Historial\n"
         "/rendimiento - Gráficas y stats\n"
         "/setbankroll - Establecer bankroll\n\n"

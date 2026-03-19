@@ -299,6 +299,249 @@ async def confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ══════════════════════════════════════════════════════════════
+# PARLAY / COMBINADA
+# ══════════════════════════════════════════════════════════════
+
+async def parlay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registra una apuesta combinada (parlay) con lenguaje natural.
+
+    Ejemplos:
+      /parlay barca gana x1.85 + liverpool over 2.5 x2.10, le meto 50
+      /parlay man u gana 1.50 y btts en juve milan 1.80, $30
+    """
+    if not GROQ_API_KEY:
+        await update.message.reply_text("❌ Falta GROQ\\_API\\_KEY.", parse_mode="Markdown")
+        return
+
+    user_text = " ".join(context.args) if context.args else ""
+    if not user_text:
+        await update.message.reply_text(
+            "🎰 *PARLAY / COMBINADA*\n\n"
+            "Escribe tus picks separados por `+` o `y`:\n\n"
+            "`/parlay barca gana x1.85 + liverpool over 2.5 x2.10, le meto 50`\n"
+            "`/parlay man u gana 1.50 y btts juve milan 1.80, $30`\n\n"
+            "_La IA detecta cada pata, calcula la cuota combinada y registra todo._",
+            parse_mode="Markdown",
+        )
+        return
+
+    user_id = update.effective_user.id
+    br = await get_or_create_bankroll(user_id)
+
+    if br["current_bankroll"] <= 0:
+        await update.message.reply_text(
+            "💀 Bankroll en $0. Usa `/setbankroll <monto>` para reiniciar.",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("🤖 Armando tu combinada...")
+
+    ai = AIAnalysisService(GROQ_API_KEY)
+    last_analysis = context.user_data.get("last_analysis", "")
+    parsed = await ai.parse_parlay(user_text, last_analysis=last_analysis)
+
+    if not parsed or "error" in parsed:
+        error = parsed.get("error", "No entendí") if parsed else "Error de conexión"
+        await msg.edit_text(
+            f"❌ {error}\n\nEjemplo:\n"
+            "`/parlay barca gana x1.85 + liverpool over 2.5 x2.10, 50`",
+            parse_mode="Markdown",
+        )
+        return
+
+    legs = parsed.get("legs", [])
+    stake = parsed.get("stake")
+
+    if len(legs) < 2:
+        await msg.edit_text(
+            "❌ Un parlay necesita al menos 2 picks.\n"
+            "Sepáralos con `+` o `y`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Validar cuotas
+    for leg in legs:
+        try:
+            leg["odds"] = float(leg["odds"])
+            if leg["odds"] <= 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            await msg.edit_text(f"❌ Cuota inválida en: {leg.get('pick', '?')}")
+            return
+
+    # Calcular cuota combinada
+    combined_odds = 1.0
+    for leg in legs:
+        combined_odds *= leg["odds"]
+    combined_odds = round(combined_odds, 2)
+
+    # Guardar para confirmación
+    context.user_data["confirm_parlay"] = {
+        "legs": legs,
+        "combined_odds": combined_odds,
+        "stake": stake,
+    }
+
+    # Mostrar resumen
+    legs_text = ""
+    for i, leg in enumerate(legs, 1):
+        legs_text += f"  {i}. {leg.get('match', '?')} → {leg['pick']} @ {leg['odds']:.2f}\n"
+
+    if stake:
+        try:
+            stake = float(stake)
+            potential = stake * (combined_odds - 1)
+            stake_text = (
+                f"\n💰 Stake: ${stake:.2f}\n"
+                f"🎁 Ganancia potencial: +${potential:.2f}"
+            )
+        except (ValueError, TypeError):
+            stake = None
+            stake_text = ""
+    else:
+        stake_text = ""
+
+    keyboard = []
+    if stake and stake > 0:
+        keyboard.append([
+            InlineKeyboardButton("✅ Confirmar", callback_data="confirmparlay_yes"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="confirmparlay_no"),
+        ])
+    else:
+        # Necesita stake - mostrar botones de %
+        stakes = [
+            round(br["current_bankroll"] * 0.01, 2),
+            round(br["current_bankroll"] * 0.02, 2),
+            round(br["current_bankroll"] * 0.03, 2),
+            round(br["current_bankroll"] * 0.05, 2),
+        ]
+        keyboard = [
+            [
+                InlineKeyboardButton(f"1% (${stakes[0]:.0f})", callback_data=f"parlaystake_{stakes[0]}"),
+                InlineKeyboardButton(f"2% (${stakes[1]:.0f})", callback_data=f"parlaystake_{stakes[1]}"),
+            ],
+            [
+                InlineKeyboardButton(f"3% (${stakes[2]:.0f})", callback_data=f"parlaystake_{stakes[2]}"),
+                InlineKeyboardButton(f"5% (${stakes[3]:.0f})", callback_data=f"parlaystake_{stakes[3]}"),
+            ],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="confirmparlay_no")],
+        ]
+
+    await msg.edit_text(
+        f"🎰 *PARLAY ({len(legs)} picks)*\n"
+        f"{'─' * 28}\n"
+        f"{legs_text}"
+        f"{'─' * 28}\n"
+        f"💹 Cuota combinada: *{combined_odds:.2f}*"
+        f"{stake_text}\n"
+        f"💼 Bankroll: ${br['current_bankroll']:.2f}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def parlay_stake_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe stake del parlay y muestra confirmación."""
+    query = update.callback_query
+    await query.answer()
+
+    stake = float(query.data.replace("parlaystake_", ""))
+    parlay = context.user_data.get("confirm_parlay")
+    if not parlay:
+        await query.edit_message_text("❌ No hay parlay pendiente.")
+        return
+
+    parlay["stake"] = stake
+
+    legs_text = ""
+    for i, leg in enumerate(parlay["legs"], 1):
+        legs_text += f"  {i}. {leg.get('match', '?')} → {leg['pick']} @ {leg['odds']:.2f}\n"
+
+    potential = stake * (parlay["combined_odds"] - 1)
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirmar", callback_data="confirmparlay_yes"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="confirmparlay_no"),
+    ]]
+
+    await query.edit_message_text(
+        f"🎰 *PARLAY ({len(parlay['legs'])} picks)*\n"
+        f"{'─' * 28}\n"
+        f"{legs_text}"
+        f"{'─' * 28}\n"
+        f"💹 Cuota combinada: *{parlay['combined_odds']:.2f}*\n"
+        f"💰 Stake: ${stake:.2f}\n"
+        f"🎁 Ganancia potencial: +${potential:.2f}\n\n"
+        f"¿Confirmas?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def confirm_parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirma o cancela el parlay."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "confirmparlay_no":
+        context.user_data.pop("confirm_parlay", None)
+        await query.edit_message_text("❌ Parlay cancelado.")
+        return
+
+    parlay = context.user_data.pop("confirm_parlay", None)
+    if not parlay:
+        await query.edit_message_text("❌ No hay parlay pendiente.")
+        return
+
+    legs = parlay["legs"]
+    stake = float(parlay["stake"])
+    combined_odds = parlay["combined_odds"]
+    user_id = query.from_user.id
+
+    br = await get_or_create_bankroll(user_id)
+    if stake > br["current_bankroll"]:
+        await query.edit_message_text(f"❌ Bankroll insuficiente (${br['current_bankroll']:.2f})")
+        return
+
+    # Construir nombre y pick del parlay
+    match_parts = [leg.get("match", "?") for leg in legs]
+    match_name = " + ".join(match_parts)
+    pick_parts = [f"{leg['pick']} @ {leg['odds']:.2f}" for leg in legs]
+    pick = "PARLAY: " + " | ".join(pick_parts)
+
+    bet_id = await add_user_bet(
+        user_id=user_id,
+        match_name=match_name[:200],  # Limitar longitud
+        league="parlay",
+        pick=pick[:200],
+        odds=combined_odds,
+        stake=stake,
+    )
+
+    br = await get_or_create_bankroll(user_id)
+    potential = stake * (combined_odds - 1)
+
+    legs_text = ""
+    for i, leg in enumerate(legs, 1):
+        legs_text += f"  {i}. {leg.get('match', '?')} → {leg['pick']} @ {leg['odds']:.2f}\n"
+
+    await query.edit_message_text(
+        f"✅ *PARLAY REGISTRADO* (#{bet_id})\n"
+        f"{'─' * 28}\n"
+        f"{legs_text}"
+        f"{'─' * 28}\n"
+        f"💹 Cuota combinada: *{combined_odds:.2f}*\n"
+        f"💰 Stake: ${stake:.2f}\n"
+        f"🎁 Ganancia potencial: +${potential:.2f}\n"
+        f"💼 Bankroll: *${br['current_bankroll']:.2f}*\n\n"
+        f"`/res gané el parlay #{bet_id}` ✅\n"
+        f"`/res perdí el parlay #{bet_id}` ❌",
+        parse_mode="Markdown",
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 # RENDIMIENTO - GRÁFICAS Y STATS AVANZADAS
 # ══════════════════════════════════════════════════════════════
 

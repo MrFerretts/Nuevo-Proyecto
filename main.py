@@ -36,6 +36,7 @@ from src.handlers.bankroll_handlers import (
     bet_command, confirm_bet_callback,
     resolve_bet_command, my_bets_command,
     rendimiento_command,
+    parlay_command, parlay_stake_callback, confirm_parlay_callback,
 )
 from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions, auto_resolve_user_bets
 
@@ -87,6 +88,8 @@ def main():
     app.add_handler(CommandHandler("resultado_apuesta", resolve_bet_command))
     app.add_handler(CommandHandler("res", resolve_bet_command))
     app.add_handler(CommandHandler("rendimiento", rendimiento_command))
+    app.add_handler(CommandHandler("parlay", parlay_command))
+    app.add_handler(CommandHandler("combinada", parlay_command))
     app.add_handler(CallbackQueryHandler(confirm_bet_callback, pattern=r"^confirmbet_"))
 
     # Conversation handler para análisis
@@ -115,6 +118,8 @@ def main():
     # Callback queries específicos (antes del genérico)
     app.add_handler(CallbackQueryHandler(quick_bet_callback, pattern=r"^quickbet_"))
     app.add_handler(CallbackQueryHandler(quick_bet_stake_callback, pattern=r"^qbstake_"))
+    app.add_handler(CallbackQueryHandler(parlay_stake_callback, pattern=r"^parlaystake_"))
+    app.add_handler(CallbackQueryHandler(confirm_parlay_callback, pattern=r"^confirmparlay_"))
 
     # Callback queries genérico (botones inline)
     app.add_handler(CallbackQueryHandler(button_callback))

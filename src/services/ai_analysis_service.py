@@ -352,6 +352,41 @@ Si no puedes identificar la apuesta: {{"error": "No identifiqué la apuesta"}}""
             return None
         return self._clean_json(result)
 
+    async def parse_parlay(self, user_message: str, last_analysis: str = "") -> dict | None:
+        """Parsea una apuesta combinada/parlay desde lenguaje natural.
+
+        Ejemplo: "barca gana x1.85 + liverpool over 2.5 x2.10, le meto 50"
+        → {"legs": [{"match": "...", "pick": "...", "odds": 1.85}, ...], "stake": 50}
+        """
+        if not self.api_key:
+            return None
+
+        context_block = ""
+        if last_analysis:
+            trimmed = last_analysis[:1000]
+            context_block = f"\nCONTEXTO del último análisis:\n{trimmed}\n"
+
+        prompt = f"""Eres un parser de apuestas combinadas (parlays). El usuario describe varias apuestas en una combinada.
+
+REGLAS:
+- Identifica CADA pata/leg de la combinada (partido, pick, cuota individual)
+- Si dice "man u", "barca", "juve", usa el nombre completo
+- Cuotas: "x1.85", "a 2.10", "@1.90", "paga x3" = cuota decimal
+- Stake: "le meto 50", "$30", "apuesto 25"
+- Separadores comunes: "+", "y", ",", "con"
+{context_block}
+MENSAJE: {user_message}
+
+Responde ÚNICAMENTE con JSON válido (sin markdown, sin ```):
+{{"legs": [{{"match": "Equipo A vs Equipo B", "pick": "Victoria Local", "odds": 1.85}}, {{"match": "Equipo C vs Equipo D", "pick": "Over 2.5", "odds": 2.10}}], "stake": 50}}
+
+Si falta el stake pon null. Si no entiendes: {{"error": "No entendí la combinada"}}"""
+
+        result = await self._call_groq(prompt, max_tokens=400)
+        if not result:
+            return None
+        return self._clean_json(result)
+
     async def parse_match_query(self, user_message: str, available_matches: list[dict]) -> dict | None:
         """Identifica qué partido quiere analizar el usuario.
 
