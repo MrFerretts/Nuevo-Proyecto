@@ -118,6 +118,70 @@ async def _save_analysis_prediction(
         logger.warning(f"Error guardando predicción: {e}")
 
 
+async def _try_fd_team_data(fd, home_name: str, away_name: str,
+                            home_id: int, away_id: int) -> tuple[list, list]:
+    """Intenta obtener datos de equipos desde football-data.org por team ID.
+
+    El endpoint /teams/{id}/matches funciona para CUALQUIER equipo europeo
+    aunque la competición (Europa League, etc.) no esté en el plan gratuito.
+    Los team IDs de API-Football y football-data.org son diferentes, así que
+    buscamos por nombre.
+    """
+    home_matches = []
+    away_matches = []
+
+    try:
+        # Buscar equipos por nombre en football-data.org
+        fd_home_id = await _search_fd_team_id(fd, home_name)
+        fd_away_id = await _search_fd_team_id(fd, away_name)
+
+        if fd_home_id:
+            home_matches = await fd.get_team_matches(fd_home_id, limit=15)
+            logger.info(f"FD team data: {home_name} (fd_id={fd_home_id}) → {len(home_matches)} partidos")
+        if fd_away_id:
+            away_matches = await fd.get_team_matches(fd_away_id, limit=15)
+            logger.info(f"FD team data: {away_name} (fd_id={fd_away_id}) → {len(away_matches)} partidos")
+    except Exception as e:
+        logger.warning(f"Error buscando team data en FD: {e}")
+
+    return home_matches, away_matches
+
+
+async def _search_fd_team_id(fd, team_name: str) -> int | None:
+    """Busca un equipo en football-data.org por nombre.
+
+    Usa el endpoint /teams con filtro de nombre.
+    """
+    try:
+        data = await fd._get("teams", {"name": team_name, "limit": 5})
+        if not data:
+            return None
+
+        teams = data.get("teams", [])
+        if not teams:
+            return None
+
+        name_lower = team_name.lower()
+        # Match exacto
+        for t in teams:
+            if t.get("name", "").lower() == name_lower:
+                return t["id"]
+        # Match parcial
+        for t in teams:
+            t_name = t.get("name", "").lower()
+            short = t.get("shortName", "").lower()
+            tla = t.get("tla", "").lower()
+            if (name_lower in t_name or t_name in name_lower or
+                    name_lower in short or short in name_lower):
+                return t["id"]
+
+        # Si hay resultados, usar el primero
+        return teams[0]["id"] if teams else None
+    except Exception as e:
+        logger.warning(f"Error buscando team '{team_name}' en FD: {e}")
+        return None
+
+
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Inicia el análisis de un partido. Uso: /analizar"""
     if not FOOTBALL_API_KEY and not FOOTBALL_DATA_API_KEY:
@@ -430,7 +494,12 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
 
 
 async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
-    """Análisis usando API-Football (fallback)."""
+    """Análisis usando API-Football (fallback).
+
+    Para ligas sin cobertura en football-data.org (Europa League, Liga MX, etc.),
+    intenta primero obtener datos de equipos desde football-data.org por team name,
+    y si no, usa API-Football con fallback a temporadas anteriores.
+    """
     service = get_stats_service()
 
     home_info = fixture.get("teams", {}).get("home", {})
@@ -440,44 +509,67 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     home_name = home_info.get("name", "Local")
     away_name = away_info.get("name", "Visitante")
 
-    home_form_fixtures = await service.get_team_form(home_id, last=10) if home_id else []
-    away_form_fixtures = await service.get_team_form(away_id, last=10) if away_id else []
-    h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=10) if (home_id and away_id) else []
-    standings = await service.get_standings(league_id, season)
+    # Estrategia: intentar football-data.org por equipo (funciona para cualquier
+    # equipo europeo aunque la competición no esté en plan free)
+    fd = get_fd_service()
+    used_fd = False
+    if fd:
+        fd_home_matches, fd_away_matches = await _try_fd_team_data(fd, home_name, away_name, home_id, away_id)
+        if fd_home_matches or fd_away_matches:
+            used_fd = True
+            logger.info(f"Europa League fix: usando football-data.org por equipo "
+                        f"(home={len(fd_home_matches)}, away={len(fd_away_matches)} partidos)")
 
-    home_form_score, home_form_detail = analyze_form(home_form_fixtures, home_id)
-    away_form_score, away_form_detail = analyze_form(away_form_fixtures, away_id)
-    home_goals = analyze_goals(home_form_fixtures, home_id)
-    away_goals = analyze_goals(away_form_fixtures, away_id)
-    h2h = analyze_h2h(h2h_fixtures, home_id)
-    home_standing = find_team_in_standings(standings, home_id)
-    away_standing = find_team_in_standings(standings, away_id)
+            home_stats = fd.calc_team_stats(fd_home_matches, home_id) if fd_home_matches else fd._empty_stats()
+            away_stats = fd.calc_team_stats(fd_away_matches, away_id) if fd_away_matches else fd._empty_stats()
 
-    home_analysis = TeamAnalysis(
-        name=home_name,
-        form_score=home_form_score,
-        form_detail=home_form_detail,
-        goals_scored_avg=home_goals["scored_avg"],
-        goals_conceded_avg=home_goals["conceded_avg"],
-        over25_pct=home_goals["over25_pct"],
-        btts_pct=home_goals["btts_pct"],
-        clean_sheets_pct=home_goals["clean_sheet_pct"],
-        league_position=home_standing["position"],
-        points=home_standing["points"],
-    )
+            h2h = {"home_wins": 0, "away_wins": 0, "draws": 0, "avg_goals": 0, "btts_pct": 0}
 
-    away_analysis = TeamAnalysis(
-        name=away_name,
-        form_score=away_form_score,
-        form_detail=away_form_detail,
-        goals_scored_avg=away_goals["scored_avg"],
-        goals_conceded_avg=away_goals["conceded_avg"],
-        over25_pct=away_goals["over25_pct"],
-        btts_pct=away_goals["btts_pct"],
-        clean_sheets_pct=away_goals["clean_sheet_pct"],
-        league_position=away_standing["position"],
-        points=away_standing["points"],
-    )
+            home_analysis = _build_team_analysis(home_name, home_stats,
+                                                  {"position": 0, "points": 0})
+            away_analysis = _build_team_analysis(away_name, away_stats,
+                                                  {"position": 0, "points": 0})
+
+    if not used_fd:
+        # Fallback original: API-Football
+        home_form_fixtures = await service.get_team_form(home_id, last=10) if home_id else []
+        away_form_fixtures = await service.get_team_form(away_id, last=10) if away_id else []
+        h2h_fixtures = await service.get_head_to_head(home_id, away_id, last=10) if (home_id and away_id) else []
+        standings = await service.get_standings(league_id, season)
+
+        home_form_score, home_form_detail = analyze_form(home_form_fixtures, home_id)
+        away_form_score, away_form_detail = analyze_form(away_form_fixtures, away_id)
+        home_goals = analyze_goals(home_form_fixtures, home_id)
+        away_goals = analyze_goals(away_form_fixtures, away_id)
+        h2h = analyze_h2h(h2h_fixtures, home_id)
+        home_standing = find_team_in_standings(standings, home_id)
+        away_standing = find_team_in_standings(standings, away_id)
+
+        home_analysis = TeamAnalysis(
+            name=home_name,
+            form_score=home_form_score,
+            form_detail=home_form_detail,
+            goals_scored_avg=home_goals["scored_avg"],
+            goals_conceded_avg=home_goals["conceded_avg"],
+            over25_pct=home_goals["over25_pct"],
+            btts_pct=home_goals["btts_pct"],
+            clean_sheets_pct=home_goals["clean_sheet_pct"],
+            league_position=home_standing["position"],
+            points=home_standing["points"],
+        )
+
+        away_analysis = TeamAnalysis(
+            name=away_name,
+            form_score=away_form_score,
+            form_detail=away_form_detail,
+            goals_scored_avg=away_goals["scored_avg"],
+            goals_conceded_avg=away_goals["conceded_avg"],
+            over25_pct=away_goals["over25_pct"],
+            btts_pct=away_goals["btts_pct"],
+            clean_sheets_pct=away_goals["clean_sheet_pct"],
+            league_position=away_standing["position"],
+            points=away_standing["points"],
+        )
 
     probs = estimate_probabilities(home_analysis, away_analysis, h2h,
                                    league_id=league_id)

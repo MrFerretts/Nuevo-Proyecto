@@ -23,7 +23,7 @@ COMPETITION_MAP = {
     78: "BL1",     # Bundesliga
     61: "FL1",     # Ligue 1
     2: "CL",       # Champions League
-    3: "EC",       # Europa Conference (Europa League no está en free)
+    3: None,       # Europa League - no disponible en plan gratuito de football-data.org
     262: None,     # Liga MX - no disponible en free
     253: None,     # MLS - no disponible en free
     13: None,      # Copa Libertadores - no disponible en free
