@@ -159,6 +159,26 @@ class FootballDataService:
             return []
         return data.get("scorers", [])
 
+    async def get_match_by_id(self, match_id: int) -> dict | None:
+        """Obtiene un partido específico por su ID.
+
+        Returns: dict con datos del partido o None si no se encuentra.
+        """
+        data = await self._get(f"matches/{match_id}")
+        return data if data else None
+
+    async def get_finished_matches(self, competition_code: str, date_from: str = None, date_to: str = None) -> list:
+        """Obtiene partidos FINALIZADOS de una competición en un rango de fechas."""
+        params = {"status": "FINISHED"}
+        if date_from:
+            params["dateFrom"] = date_from
+        if date_to:
+            params["dateTo"] = date_to
+        data = await self._get(f"competitions/{competition_code}/matches", params)
+        if not data:
+            return []
+        return data.get("matches", [])
+
     # ── Cálculos estadísticos ───────────────────────────────────────
 
     def calc_team_stats(self, matches: list, team_id: int) -> dict:

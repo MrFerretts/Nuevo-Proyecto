@@ -65,9 +65,17 @@ async def init_db():
                 was_correct INTEGER,
                 profit REAL DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                resolved_at TEXT
+                resolved_at TEXT,
+                fd_match_id INTEGER,
+                league_id INTEGER DEFAULT 0
             )
         """)
+        # Migración: agregar columnas nuevas a tablas existentes
+        for col, coltype in [("fd_match_id", "INTEGER"), ("league_id", "INTEGER DEFAULT 0")]:
+            try:
+                await db.execute(f"ALTER TABLE predictions ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass  # Ya existe
         await db.commit()
 
 
@@ -196,7 +204,8 @@ async def get_total_revenue():
 
 async def save_prediction(match_name: str, league: str, match_date: str,
                           home_team: str, away_team: str, probs: dict,
-                          suggestion: dict = None) -> int:
+                          suggestion: dict = None,
+                          fd_match_id: int = None, league_id: int = 0) -> int:
     """Guarda una predicción para tracking de precisión.
 
     Args:
@@ -206,6 +215,8 @@ async def save_prediction(match_name: str, league: str, match_date: str,
         home_team, away_team: nombres
         probs: dict con probabilidades estimadas
         suggestion: dict con la apuesta sugerida (opcional)
+        fd_match_id: ID del partido en football-data.org (para auto-resolución)
+        league_id: ID interno de la liga
 
     Returns: ID de la predicción guardada
     """
@@ -216,8 +227,9 @@ async def save_prediction(match_name: str, league: str, match_date: str,
                 home_win_prob, draw_prob, away_win_prob, over25_prob, btts_prob,
                 home_xg, away_xg,
                 predicted_market, predicted_pick, predicted_odds,
-                predicted_edge, predicted_confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                predicted_edge, predicted_confidence,
+                fd_match_id, league_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 match_name, league, match_date, home_team, away_team,
                 probs.get("home_win", 0), probs.get("draw", 0), probs.get("away_win", 0),
@@ -228,6 +240,7 @@ async def save_prediction(match_name: str, league: str, match_date: str,
                 suggestion.get("odds", 0) if suggestion else 0,
                 suggestion.get("edge", 0) if suggestion else 0,
                 suggestion.get("confidence", "") if suggestion else "",
+                fd_match_id, league_id,
             ),
         )
         await db.commit()

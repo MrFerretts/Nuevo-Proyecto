@@ -30,7 +30,7 @@ from src.handlers.analysis_handlers import (
     opportunities_command, cancel_analysis,
     SELECT_LEAGUE, SELECT_MATCH,
 )
-from src.services.scheduler_service import check_expired_vips
+from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -109,7 +109,17 @@ def main():
         minute=0,
         args=[app.bot],
     )
+    # Auto-resolver predicciones cada 2 horas
+    scheduler.add_job(
+        auto_resolve_predictions,
+        "interval",
+        hours=2,
+        args=[app.bot],
+        id="auto_resolve",
+        name="Auto-resolver predicciones",
+    )
     scheduler.start()
+    logger.info("⏰ Scheduler: VIP check (9:00 diario) + Auto-resolve (cada 2h)")
 
     # Log de diagnóstico de API keys
     logger.info("═══ DIAGNÓSTICO DE API KEYS ═══")

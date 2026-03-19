@@ -83,6 +83,7 @@ def can_use_fd(league_id: int) -> bool:
 async def _save_analysis_prediction(
     home_name: str, away_name: str, league_id: int,
     match_date: str, probs: dict, suggestions: list,
+    fd_match_id: int = None,
 ):
     """Guarda la predicción principal para tracking de precisión."""
     try:
@@ -109,8 +110,10 @@ async def _save_analysis_prediction(
             away_team=away_name,
             probs=probs,
             suggestion=suggestion_data,
+            fd_match_id=fd_match_id,
+            league_id=league_id,
         )
-        logger.info(f"Predicción guardada: ID={pred_id} - {match_name}")
+        logger.info(f"Predicción guardada: ID={pred_id} - {match_name} (fd_match_id={fd_match_id})")
     except Exception as e:
         logger.warning(f"Error guardando predicción: {e}")
 
@@ -403,9 +406,10 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
 
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
 
-    # Guardar predicción para tracking
+    # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
-    await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions)
+    fd_match_id = fixture.get("_fd_match_id")
+    await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions, fd_match_id=fd_match_id)
 
     # Análisis con IA (si está configurado)
     ai = get_ai_service()
