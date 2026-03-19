@@ -588,3 +588,102 @@ async def get_user_bet_stats(user_id: int) -> dict:
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else {}
+
+
+async def get_user_bets_timeline(user_id: int) -> list:
+    """Obtiene todas las apuestas resueltas en orden cronológico para gráficas."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM user_bets
+               WHERE user_id = ? AND result != 'pending'
+               ORDER BY resolved_at ASC""",
+            (user_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_user_streak(user_id: int) -> dict:
+    """Calcula la racha actual y mejor racha del usuario."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT result FROM user_bets
+               WHERE user_id = ? AND result IN ('win', 'loss')
+               ORDER BY resolved_at DESC""",
+            (user_id,),
+        ) as cursor:
+            results = [dict(r)["result"] for r in await cursor.fetchall()]
+
+    if not results:
+        return {"current": 0, "current_type": "none", "best_win": 0, "worst_loss": 0}
+
+    # Racha actual
+    current_type = results[0]
+    current = 0
+    for r in results:
+        if r == current_type:
+            current += 1
+        else:
+            break
+
+    # Mejor racha de wins y peor racha de losses
+    best_win = 0
+    worst_loss = 0
+    streak = 0
+    prev = None
+    for r in reversed(results):
+        if r == prev:
+            streak += 1
+        else:
+            streak = 1
+            prev = r
+        if r == "win" and streak > best_win:
+            best_win = streak
+        if r == "loss" and streak > worst_loss:
+            worst_loss = streak
+
+    return {
+        "current": current,
+        "current_type": current_type,
+        "best_win": best_win,
+        "worst_loss": worst_loss,
+    }
+
+
+async def get_user_stats_by_pick(user_id: int) -> list:
+    """Estadísticas agrupadas por tipo de apuesta."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                pick,
+                COUNT(*) as total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result != 'pending' THEN profit ELSE 0 END) as profit,
+                SUM(CASE WHEN result != 'pending' THEN stake ELSE 0 END) as staked
+            FROM user_bets WHERE user_id = ? AND result != 'pending'
+            GROUP BY pick ORDER BY profit DESC""",
+            (user_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_user_weekly_stats(user_id: int) -> list:
+    """P&L agrupado por semana."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                strftime('%Y-W%W', resolved_at) as week,
+                COUNT(*) as bets,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+                SUM(profit) as profit,
+                SUM(stake) as staked
+            FROM user_bets
+            WHERE user_id = ? AND result != 'pending' AND resolved_at IS NOT NULL
+            GROUP BY week ORDER BY week ASC""",
+            (user_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]

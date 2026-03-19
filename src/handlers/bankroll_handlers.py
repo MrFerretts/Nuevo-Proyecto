@@ -5,9 +5,11 @@ Comandos:
   /apostar           - Registrar apuesta con lenguaje natural
   /misapuestas       - Ver historial de apuestas
   /resultado_apuesta - Resolver una apuesta (win/loss/void)
+  /rendimiento       - Gráficas y stats avanzadas
   /setbankroll       - Establecer bankroll inicial
 """
 
+import io
 import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +19,11 @@ from src.config import GROQ_API_KEY
 from src.models.database import (
     get_or_create_bankroll, set_bankroll, add_user_bet,
     resolve_user_bet, get_user_bets, get_user_pending_bets,
-    get_user_bet_stats,
+    get_user_bet_stats, get_user_bets_timeline, get_user_streak,
+    get_user_stats_by_pick, get_user_weekly_stats,
+)
+from src.services.chart_service import (
+    generate_pnl_chart, generate_weekly_chart, generate_pick_stats_chart,
 )
 from src.services.ai_analysis_service import AIAnalysisService
 
@@ -290,6 +296,114 @@ async def confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         f"`/resultado_apuesta {bet_id} void` ↩️",
         parse_mode="Markdown",
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# RENDIMIENTO - GRÁFICAS Y STATS AVANZADAS
+# ══════════════════════════════════════════════════════════════
+
+async def rendimiento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra gráficas de rendimiento y estadísticas avanzadas."""
+    user_id = update.effective_user.id
+    br = await get_or_create_bankroll(user_id)
+    stats = await get_user_bet_stats(user_id)
+
+    resolved = (stats.get("wins", 0) or 0) + (stats.get("losses", 0) or 0) + (stats.get("voids", 0) or 0)
+    if resolved < 1:
+        await update.message.reply_text(
+            "📭 Necesitas al menos 1 apuesta resuelta para ver tu rendimiento.\n"
+            "Usa /apostar para registrar y /resultado\\_apuesta para resolver.",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("📊 Generando tu reporte de rendimiento...")
+
+    # Obtener todos los datos en paralelo (son queries independientes)
+    streak = await get_user_streak(user_id)
+    pick_stats = await get_user_stats_by_pick(user_id)
+    weekly = await get_user_weekly_stats(user_id)
+    timeline = await get_user_bets_timeline(user_id)
+
+    # ── Texto de stats avanzadas ──
+    streak_emoji = "🔥" if streak["current_type"] == "win" else "💀"
+    streak_text = (
+        f"{streak_emoji} *Racha actual:* {streak['current']} {streak['current_type']}s seguidos\n"
+        f"🏆 *Mejor racha:* {streak['best_win']} wins | "
+        f"📉 *Peor racha:* {streak['worst_loss']} losses"
+    )
+
+    # Stats por tipo de apuesta (top 5)
+    pick_text = ""
+    if pick_stats:
+        pick_text = "\n\n📋 *POR TIPO DE APUESTA:*\n"
+        for s in pick_stats[:5]:
+            total = s["total"]
+            w = s["wins"] or 0
+            wr = (w / total * 100) if total > 0 else 0
+            p = s["profit"] or 0
+            sign = "+" if p >= 0 else ""
+            emoji = "✅" if p >= 0 else "❌"
+            pick_text += f"{emoji} {s['pick']}: {w}/{total} ({wr:.0f}%) → {sign}${p:.2f}\n"
+
+    # Weekly summary (últimas 4 semanas)
+    week_text = ""
+    if weekly:
+        week_text = "\n\n📅 *ÚLTIMAS SEMANAS:*\n"
+        for w in weekly[-4:]:
+            p = w["profit"] or 0
+            sign = "+" if p >= 0 else ""
+            emoji = "📈" if p >= 0 else "📉"
+            wr = (w["wins"] / w["bets"] * 100) if w["bets"] > 0 else 0
+            week_text += f"{emoji} {w['week']}: {sign}${p:.2f} ({w['bets']} apuestas, {wr:.0f}% wr)\n"
+
+    text = (
+        f"📊 *REPORTE DE RENDIMIENTO*\n"
+        f"{'═' * 28}\n\n"
+        f"{streak_text}"
+        f"{pick_text}"
+        f"{week_text}"
+    )
+
+    await msg.edit_text(text, parse_mode="Markdown")
+
+    # ── Generar y enviar gráficas ──
+    charts_sent = 0
+
+    # 1. Gráfica de evolución del bankroll
+    pnl_chart = generate_pnl_chart(timeline, br["initial_bankroll"])
+    if pnl_chart:
+        await update.message.reply_photo(
+            photo=io.BytesIO(pnl_chart),
+            caption="📈 Evolución del Bankroll",
+        )
+        charts_sent += 1
+
+    # 2. Gráfica semanal
+    if weekly and len(weekly) >= 2:
+        weekly_chart = generate_weekly_chart(weekly)
+        if weekly_chart:
+            await update.message.reply_photo(
+                photo=io.BytesIO(weekly_chart),
+                caption="📅 P&L Semanal",
+            )
+            charts_sent += 1
+
+    # 3. Gráfica por tipo de apuesta
+    if pick_stats and len(pick_stats) >= 2:
+        pick_chart = generate_pick_stats_chart(pick_stats)
+        if pick_chart:
+            await update.message.reply_photo(
+                photo=io.BytesIO(pick_chart),
+                caption="🎯 Rendimiento por Tipo de Apuesta",
+            )
+            charts_sent += 1
+
+    if charts_sent == 0:
+        await update.message.reply_text(
+            "_Necesitas más apuestas resueltas para generar gráficas._",
+            parse_mode="Markdown",
+        )
 
 
 # ══════════════════════════════════════════════════════════════

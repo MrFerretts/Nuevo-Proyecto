@@ -34,6 +34,7 @@ from src.handlers.bankroll_handlers import (
     bankroll_command, set_bankroll_command,
     bet_command, confirm_bet_callback,
     resolve_bet_command, my_bets_command,
+    rendimiento_command,
 )
 from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions
 
@@ -83,6 +84,7 @@ def main():
     app.add_handler(CommandHandler("apostar", bet_command))
     app.add_handler(CommandHandler("misapuestas", my_bets_command))
     app.add_handler(CommandHandler("resultado_apuesta", resolve_bet_command))
+    app.add_handler(CommandHandler("rendimiento", rendimiento_command))
     app.add_handler(CallbackQueryHandler(confirm_bet_callback, pattern=r"^confirmbet_"))
 
     # Conversation handler para análisis

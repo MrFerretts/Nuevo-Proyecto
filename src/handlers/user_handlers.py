@@ -52,6 +52,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/apostar - Registrar apuesta (lenguaje natural)\n"
         "/misapuestas - Historial de apuestas\n"
         "/resultado\\_apuesta - Resolver apuesta (win/loss)\n"
+        "/rendimiento - Gráficas y stats avanzadas\n"
         "/setbankroll - Establecer bankroll inicial\n\n"
         "👤 *General:*\n"
         "/start - Iniciar el bot\n"
