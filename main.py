@@ -11,7 +11,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.config import BOT_TOKEN, ADMIN_ID
+from src.config import BOT_TOKEN, ADMIN_ID, GROQ_API_KEY, FOOTBALL_DATA_API_KEY, FOOTBALL_API_KEY, ODDS_API_KEY
 from src.models.database import init_db
 from src.handlers.user_handlers import (
     start, help_command, stats_command, tips_command,
@@ -110,6 +110,14 @@ def main():
         args=[app.bot],
     )
     scheduler.start()
+
+    # Log de diagnóstico de API keys
+    logger.info("═══ DIAGNÓSTICO DE API KEYS ═══")
+    logger.info(f"  GROQ_API_KEY: {'✅ configurada (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else '❌ NO CONFIGURADA'}")
+    logger.info(f"  FOOTBALL_DATA_API_KEY: {'✅' if FOOTBALL_DATA_API_KEY else '❌'}")
+    logger.info(f"  FOOTBALL_API_KEY: {'✅' if FOOTBALL_API_KEY else '❌'}")
+    logger.info(f"  ODDS_API_KEY: {'✅' if ODDS_API_KEY else '❌'}")
+    logger.info("═══════════════════════════════")
 
     logger.info("🤖 Bot iniciado!")
     app.run_polling(drop_pending_updates=True)
