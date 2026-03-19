@@ -96,22 +96,33 @@ class FootballStatsService:
         return []
 
     async def get_team_form(self, team_id: int, last: int = 10) -> list:
-        """Últimos partidos de un equipo.
+        """Últimos partidos de un equipo, ordenados de más reciente a más antiguo.
 
         Intenta con 'last', si falla usa season 2024 como fallback.
+        API-Football devuelve fixtures en orden cronológico (antiguo→reciente),
+        así que invertimos para que analyze_form reciba el más reciente primero.
         """
         params = {"team": team_id, "last": last}
         results = await self._get("fixtures", params)
         if results:
+            results.sort(key=lambda f: f.get("fixture", {}).get("date", ""), reverse=True)
             return results
 
-        # Fallback: usar season permitida en plan gratuito
-        for season in [2024, 2023]:
+        # Fallback: usar season (intentar actual primero, luego anteriores)
+        from datetime import datetime
+        current_year = datetime.now().year
+        current_season = current_year if datetime.now().month >= 7 else current_year - 1
+        for season in [current_season, current_season - 1, current_season - 2]:
             params = {"team": team_id, "season": season}
             results = await self._get("fixtures", params)
             if results:
-                logger.info(f"Team form fallback worked with season={season} ({len(results)} fixtures)")
-                return results[-last:]  # últimos N partidos de esa temporada
+                # Filtrar solo partidos terminados
+                finished = [f for f in results if f.get("fixture", {}).get("status", {}).get("short") == "FT"]
+                if finished:
+                    logger.info(f"Team form fallback: season={season}, {len(finished)} finished fixtures")
+                    finished = finished[-last:]
+                    finished.sort(key=lambda f: f.get("fixture", {}).get("date", ""), reverse=True)
+                    return finished
         return []
 
     async def get_standings(self, league_id: int, season: int) -> list:
