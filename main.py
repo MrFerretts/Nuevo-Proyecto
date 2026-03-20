@@ -52,12 +52,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def error_handler(update, context):
+    """Global error handler — logs unhandled exceptions instead of crashing silently."""
+    logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Ocurrió un error procesando tu solicitud. Intenta de nuevo."
+            )
+        except Exception:
+            pass
+
+
 def main():
     if not BOT_TOKEN:
         print("❌ Error: BOT_TOKEN no configurado. Copia .env.example a .env y configúralo.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Global error handler — prevents silent crashes
+    app.add_error_handler(error_handler)
 
     # Conversation handler para crear tips
     tip_conv = ConversationHandler(
@@ -72,6 +87,7 @@ def main():
             VIP_CHOICE: [CallbackQueryHandler(tip_vip_choice, pattern=r"^tipvip_")],
         },
         fallbacks=[CommandHandler("cancelar", cancel_tip)],
+        conversation_timeout=300,  # 5 min timeout to prevent stuck states
     )
 
     # User commands
@@ -105,6 +121,7 @@ def main():
             SELECT_MATCH: [CallbackQueryHandler(select_match, pattern=r"^fixture_")],
         },
         fallbacks=[CommandHandler("cancelar", cancel_analysis)],
+        conversation_timeout=300,  # 5 min timeout to prevent stuck states
     )
 
     # Admin commands
