@@ -136,6 +136,7 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("resolver", resolve_prediction_command))
     app.add_handler(CommandHandler("precision", precision_command))
+    app.add_handler(CommandHandler("calibracion", precision_command))
     app.add_handler(CommandHandler("pendientes", pending_predictions_command))
     app.add_handler(CommandHandler("admin", admin_panel))
 

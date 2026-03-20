@@ -404,9 +404,8 @@ async def resolve_prediction_command(update: Update, context: ContextTypes.DEFAU
     )
 
 
-@admin_only
 async def precision_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra métricas de precisión del modelo.
+    """Muestra métricas de precisión del modelo — disponible para todos.
 
     Uso: /precision [días]
     """
@@ -423,7 +422,7 @@ async def precision_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📊 No hay predicciones resueltas aún.\n\n"
             "Las predicciones se guardan automáticamente al usar /analizar.\n"
-            "Usa /resolver para registrar resultados reales."
+            "Los resultados se resuelven automáticamente cada 2 horas."
         )
         return
 
@@ -433,11 +432,46 @@ async def precision_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         f"🎯 Predicciones resueltas: *{accuracy['resolved']}*",
         f"⏳ Pendientes: *{accuracy.get('pending', 0)}*",
-        f"✅ Aciertos: *{accuracy['correct']}* / {accuracy['resolved']}",
-        f"📈 Accuracy: *{accuracy['accuracy']:.1%}*",
+        f"✅ Aciertos (pick): *{accuracy['correct']}* / {accuracy['resolved']}",
+        f"📈 Accuracy (pick): *{accuracy['accuracy']:.1%}*",
         f"💰 Profit (unidades): *{accuracy['profit']:+.2f}*",
         f"📊 ROI: *{accuracy['roi']:+.1f}%*",
     ]
+
+    # Per-market accuracy (learning system)
+    per_market = accuracy.get("per_market", {})
+    if per_market:
+        lines.extend(["", "🧠 *APRENDIZAJE POR MERCADO:*"])
+        for mkt in ["1x2", "over25", "btts"]:
+            data = per_market.get(mkt)
+            if data and data["total"] > 0:
+                n = data["total"]
+                c = data["correct"]
+                acc = c / n
+                emoji = "✅" if acc >= 0.55 else ("🟡" if acc >= 0.45 else "❌")
+                label = {"1x2": "Resultado 1X2", "over25": "Over/Under 2.5", "btts": "BTTS"}.get(mkt, mkt)
+                lines.append(f"  {emoji} {label}: *{acc:.0%}* ({c}/{n})")
+
+    # Calibración bias
+    from src.models.database import get_per_market_calibration
+    cal = await get_per_market_calibration(days=days)
+    if cal.get("sample_size", 0) >= 5:
+        bias_lines = []
+        for mkt_key, label in [("over25", "Over 2.5"), ("btts", "BTTS"), ("xg", "xG")]:
+            mkt_data = cal.get(mkt_key)
+            if mkt_data:
+                if mkt_key == "xg":
+                    bias = mkt_data.get("bias", 0)
+                    if abs(bias) > 0.1:
+                        direction = "sobreestima" if bias > 0 else "subestima"
+                        bias_lines.append(f"  📐 {label}: {direction} por *{abs(bias):.2f}* goles")
+                else:
+                    bias = mkt_data.get("bias", 0)
+                    if abs(bias) > 0.02:
+                        direction = "sobreestima" if bias > 0 else "subestima"
+                        bias_lines.append(f"  📐 {label}: {direction} por *{abs(bias):.1%}*")
+        if bias_lines:
+            lines.extend(["", "📐 *SESGO DETECTADO:*"] + bias_lines)
 
     # Por confianza
     if accuracy["by_confidence"]:
@@ -450,26 +484,15 @@ async def precision_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"({data['accuracy']:.0%}) | P/L: {data['profit']:+.2f}"
                 )
 
-    # Por mercado
+    # Por mercado (pick principal)
     if accuracy["by_market"]:
-        lines.extend(["", "📊 *POR MERCADO:*"])
+        lines.extend(["", "📊 *POR TIPO DE PICK:*"])
         for market, data in sorted(accuracy["by_market"].items(), key=lambda x: x[1]["total"], reverse=True):
             if data["total"] > 0 and market:
                 lines.append(
                     f"  {market}: {data['correct']}/{data['total']} "
                     f"({data['accuracy']:.0%}) | P/L: {data['profit']:+.2f}"
                 )
-
-    # Calibración
-    if accuracy["calibration"]:
-        lines.extend(["", "📊 *CALIBRACIÓN (predicho vs real):*"])
-        for bucket, data in sorted(accuracy["calibration"].items()):
-            diff = data["actual"] - data["predicted"]
-            emoji = "✅" if abs(diff) < 0.1 else "⚠️"
-            lines.append(
-                f"  {emoji} {bucket}: predicho {data['predicted']:.0%} → real {data['actual']:.0%} "
-                f"(n={data['count']})"
-            )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
