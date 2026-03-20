@@ -10,6 +10,7 @@ Incluye modelo de Poisson para estimación de goles y resultados exactos.
 import math
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -784,12 +785,74 @@ def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: floa
 # FORMATO DEL REPORTE
 # ══════════════════════════════════════════════════════════════════
 
+def analyze_line_movement(odds_history: list) -> list[str]:
+    """Analiza movimiento de cuotas para detectar dinero inteligente.
+
+    Si tenemos 2+ snapshots, compara las odds iniciales vs las más recientes.
+    Un movimiento de >5% en la implied probability es significativo.
+
+    Returns: líneas de texto para el reporte
+    """
+    if not odds_history or len(odds_history) < 2:
+        return []
+
+    first = odds_history[0]
+    last = odds_history[-1]
+    hours_diff = 0
+    try:
+        t1 = datetime.fromisoformat(first["snapshot_at"])
+        t2 = datetime.fromisoformat(last["snapshot_at"])
+        hours_diff = (t2 - t1).total_seconds() / 3600
+    except Exception:
+        pass
+
+    if hours_diff < 1:
+        return []
+
+    lines = []
+    movements = []
+
+    for label, key in [("Local", "home_odds"), ("Empate", "draw_odds"), ("Visitante", "away_odds")]:
+        old_odds = first.get(key, 0)
+        new_odds = last.get(key, 0)
+        if old_odds > 1 and new_odds > 1:
+            old_implied = 1 / old_odds
+            new_implied = 1 / new_odds
+            shift = new_implied - old_implied
+
+            if abs(shift) > 0.03:  # >3% cambio en implied prob
+                direction = "⬇️" if new_odds < old_odds else "⬆️"
+                action = "Dinero ENTRANDO" if new_odds < old_odds else "Dinero SALIENDO"
+                movements.append(
+                    f"  {direction} {label}: {old_odds:.2f} → {new_odds:.2f} ({action})"
+                )
+
+    if movements:
+        lines.append("")
+        lines.append(f"📈 *LINE MOVEMENT* _(últimas {hours_diff:.0f}h)_")
+        lines.extend(movements)
+        # Detectar steam move (movimiento fuerte unidireccional)
+        home_old = first.get("home_odds", 0)
+        home_new = last.get("home_odds", 0)
+        away_old = first.get("away_odds", 0)
+        away_new = last.get("away_odds", 0)
+        if home_old > 1 and home_new > 1:
+            home_shift = (1 / home_new) - (1 / home_old)
+            if home_shift > 0.06:
+                lines.append("  🔥 *STEAM MOVE en LOCAL* — dinero inteligente fuerte")
+            elif home_shift < -0.06:
+                lines.append("  🔥 *STEAM MOVE en VISITANTE* — dinero inteligente fuerte")
+
+    return lines
+
+
 def format_analysis_report(
     home: TeamAnalysis,
     away: TeamAnalysis,
     h2h: dict,
     probs: dict,
     suggestions: list[BetSuggestion],
+    odds_history: list = None,
 ) -> str:
     """Genera un reporte completo de análisis formateado para Telegram."""
     # Detectar si los datos están vacíos (API falló)
@@ -942,5 +1005,11 @@ def format_analysis_report(
             "⚠️ *No se encontraron apuestas con valor claro en este partido.*",
             "Las cuotas del mercado parecen ajustadas a las probabilidades reales.",
         ])
+
+    # Line movement (si hay historial de odds)
+    if odds_history:
+        movement_lines = analyze_line_movement(odds_history)
+        if movement_lines:
+            lines.extend(movement_lines)
 
     return "\n".join(lines)

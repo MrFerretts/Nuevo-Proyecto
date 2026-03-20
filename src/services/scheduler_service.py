@@ -3,11 +3,11 @@ from datetime import datetime, timedelta
 
 import aiosqlite
 
-from src.config import ADMIN_ID, FOOTBALL_DATA_API_KEY, DB_PATH
+from src.config import ADMIN_ID, FOOTBALL_DATA_API_KEY, ODDS_API_KEY, DB_PATH
 from src.models.database import (
     get_vip_users, remove_vip,
     get_pending_predictions, resolve_prediction,
-    resolve_user_bet,
+    resolve_user_bet, save_odds_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -397,3 +397,203 @@ def _evaluate_user_bet(pick: str, home_goals: int, away_goals: int) -> str | Non
 
     # Si no se pudo evaluar, no resolver automáticamente
     return None
+
+
+# ══════════════════════════════════════════════════════════════════
+# ODDS SNAPSHOT (cada 3 horas, para line movement)
+# ══════════════════════════════════════════════════════════════════
+
+# Mapeo de liga → sport_key de The Odds API
+_LEAGUE_SPORT_KEYS = {
+    39: "soccer_epl",
+    140: "soccer_spain_la_liga",
+    135: "soccer_italy_serie_a",
+    78: "soccer_germany_bundesliga",
+    61: "soccer_france_ligue_one",
+    2: "soccer_uefa_champs_league",
+    3: "soccer_uefa_europa_league",
+    262: "soccer_mexico_ligamx",
+    253: "soccer_usa_mls",
+}
+
+
+async def periodic_odds_snapshot(bot):
+    """Guarda snapshot de odds para TODOS los partidos próximos.
+
+    Esto permite detectar line movement (movimiento de cuotas)
+    cuando se analiza un partido: si las odds bajan, el dinero
+    inteligente entró por ese lado.
+
+    Se ejecuta cada 3 horas. Usa ~5-8 requests de The Odds API por ejecución.
+    """
+    if not ODDS_API_KEY:
+        return
+
+    from src.services.odds_service import get_upcoming_games
+
+    total_saved = 0
+
+    for league_id, sport_key in _LEAGUE_SPORT_KEYS.items():
+        try:
+            games = await get_upcoming_games(sport_key, limit=15, markets="h2h,totals")
+            if not games:
+                continue
+
+            for game in games:
+                home = game.get("home_team", "")
+                away = game.get("away_team", "")
+                match_name = f"{home} vs {away}"
+
+                # Extraer odds del primer bookmaker disponible
+                odds = _extract_best_odds(game)
+                if odds:
+                    await save_odds_snapshot(match_name, league_id, odds)
+                    total_saved += 1
+
+        except Exception as e:
+            logger.warning(f"Odds snapshot error para {sport_key}: {e}")
+
+    if total_saved > 0:
+        logger.info(f"Odds snapshot: {total_saved} partidos guardados")
+
+
+def _extract_best_odds(game: dict) -> dict | None:
+    """Extrae las mejores odds promedio de los bookmakers disponibles."""
+    bookmakers = game.get("bookmakers", [])
+    if not bookmakers:
+        return None
+
+    odds = {}
+
+    for bm in bookmakers:
+        for market in bm.get("markets", []):
+            key = market.get("key")
+            outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+
+            if key == "h2h":
+                home_team = game.get("home_team", "")
+                away_team = game.get("away_team", "")
+                if home_team in outcomes:
+                    odds.setdefault("home_all", []).append(outcomes[home_team])
+                if away_team in outcomes:
+                    odds.setdefault("away_all", []).append(outcomes[away_team])
+                if "Draw" in outcomes:
+                    odds.setdefault("draw_all", []).append(outcomes["Draw"])
+            elif key == "totals":
+                if "Over" in outcomes:
+                    odds.setdefault("over25_all", []).append(outcomes["Over"])
+                if "Under" in outcomes:
+                    odds.setdefault("under25_all", []).append(outcomes["Under"])
+
+    if not odds.get("home_all"):
+        return None
+
+    return {
+        "home": sum(odds.get("home_all", [0])) / len(odds["home_all"]),
+        "draw": sum(odds.get("draw_all", [0])) / max(len(odds.get("draw_all", [1])), 1),
+        "away": sum(odds.get("away_all", [0])) / max(len(odds.get("away_all", [1])), 1),
+        "over25": sum(odds.get("over25_all", [0])) / max(len(odds.get("over25_all", [1])), 1),
+        "under25": sum(odds.get("under25_all", [0])) / max(len(odds.get("under25_all", [1])), 1),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# AUTO-CALIBRACIÓN (después de cada auto-resolve, ajusta confianza)
+# ══════════════════════════════════════════════════════════════════
+
+async def run_calibration_check(bot):
+    """Analiza accuracy del modelo y genera reporte de calibración.
+
+    Compara probabilidades predichas vs resultados reales para cada
+    nivel de confianza y mercado. Si detecta desviaciones significativas,
+    notifica al admin con recomendaciones.
+
+    Se ejecuta diariamente a las 10:00.
+    """
+    from src.models.database import get_prediction_accuracy
+
+    accuracy = await get_prediction_accuracy(days=30)
+
+    if accuracy["total"] < 10:
+        return  # No hay suficientes datos
+
+    lines = [
+        "📊 *REPORTE DE CALIBRACIÓN*",
+        f"_Últimos 30 días: {accuracy['total']} predicciones_",
+        "",
+        f"🎯 Accuracy global: *{accuracy['accuracy']:.1%}*",
+        f"💰 Profit: *{accuracy['profit']:+.1f}u* | ROI: *{accuracy['roi']:+.1f}%*",
+        "",
+    ]
+
+    # Análisis por nivel de confianza
+    alerts = []
+    by_conf = accuracy.get("by_confidence", {})
+    if by_conf:
+        lines.append("📋 *POR CONFIANZA:*")
+        for conf, data in sorted(by_conf.items(), key=lambda x: x[1]["total"], reverse=True):
+            acc = data["accuracy"]
+            n = data["total"]
+            profit = data["profit"]
+            emoji = "✅" if profit > 0 else "❌"
+            lines.append(f"  {emoji} {conf}: {acc:.0%} ({n} picks, {profit:+.1f}u)")
+
+            # Alertas de calibración
+            if conf == "muy_alta" and acc < 0.55 and n >= 5:
+                alerts.append(f"⚠️ 'muy_alta' solo acierta {acc:.0%} — umbral demasiado bajo")
+            if conf == "alta" and acc < 0.50 and n >= 5:
+                alerts.append(f"⚠️ 'alta' solo acierta {acc:.0%} — revisar edge mínimo")
+            if conf == "baja" and acc > 0.60 and n >= 5:
+                alerts.append(f"💡 'baja' acierta {acc:.0%} — podría subir de confianza")
+
+    # Análisis por mercado
+    by_market = accuracy.get("by_market", {})
+    if by_market:
+        lines.extend(["", "📋 *POR MERCADO:*"])
+        for market, data in sorted(by_market.items(), key=lambda x: x[1]["total"], reverse=True):
+            acc = data["accuracy"]
+            n = data["total"]
+            profit = data["profit"]
+            emoji = "✅" if profit > 0 else "❌"
+            lines.append(f"  {emoji} {market}: {acc:.0%} ({n}, {profit:+.1f}u)")
+
+            if acc < 0.40 and n >= 5:
+                alerts.append(f"⚠️ Mercado '{market}' con {acc:.0%} accuracy — considerar desactivar")
+
+    # Calibración
+    calibration = accuracy.get("calibration", {})
+    if calibration:
+        lines.extend(["", "📋 *CALIBRACIÓN (predicho vs real):*"])
+        for bucket, data in sorted(calibration.items()):
+            pred = data["predicted"]
+            actual = data["actual"]
+            n = data["count"]
+            diff = abs(pred - actual)
+            emoji = "✅" if diff < 0.05 else ("🟡" if diff < 0.10 else "🔴")
+            lines.append(f"  {emoji} {bucket}: pred={pred:.0%} real={actual:.0%} (n={n})")
+
+            if diff > 0.10 and n >= 5:
+                direction = "sobreestima" if pred > actual else "subestima"
+                alerts.append(f"🔴 Rango {bucket}: modelo {direction} por {diff:.0%}")
+
+    # Alertas y recomendaciones
+    if alerts:
+        lines.extend(["", "🚨 *ALERTAS:*"])
+        for alert in alerts:
+            lines.append(f"  {alert}")
+
+    if not alerts:
+        lines.extend(["", "✅ *Modelo bien calibrado.*"])
+
+    # Notificar al admin
+    if bot and ADMIN_ID:
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text="\n".join(lines),
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.warning(f"Error enviando calibración: {e}")
+
+    logger.info(f"Calibration check completado: {accuracy['total']} predicciones, {accuracy['accuracy']:.1%} accuracy")

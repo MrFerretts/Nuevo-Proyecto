@@ -40,7 +40,10 @@ from src.handlers.bankroll_handlers import (
     parlay_command, parlay_stake_callback, confirm_parlay_callback,
     confirm_result_callback,
 )
-from src.services.scheduler_service import check_expired_vips, auto_resolve_predictions, auto_resolve_user_bets
+from src.services.scheduler_service import (
+    check_expired_vips, auto_resolve_predictions, auto_resolve_user_bets,
+    periodic_odds_snapshot, run_calibration_check,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -160,8 +163,27 @@ def main():
         id="auto_resolve_bets",
         name="Auto-resolver apuestas de usuarios",
     )
+    # Snapshot de odds cada 3 horas (para line movement)
+    scheduler.add_job(
+        periodic_odds_snapshot,
+        "interval",
+        hours=3,
+        args=[app.bot],
+        id="odds_snapshot",
+        name="Snapshot de odds para line movement",
+    )
+    # Reporte de calibración diario a las 10:00
+    scheduler.add_job(
+        run_calibration_check,
+        "cron",
+        hour=10,
+        minute=0,
+        args=[app.bot],
+        id="calibration_check",
+        name="Reporte de calibración diario",
+    )
     scheduler.start()
-    logger.info("⏰ Scheduler: VIP check (9:00) + Auto-resolve predicciones (2h) + Auto-resolve apuestas (2h)")
+    logger.info("⏰ Scheduler: VIP (9:00) + Calibración (10:00) + Resolve (2h) + Odds snapshot (3h)")
 
     # Log de diagnóstico de API keys
     logger.info("═══ DIAGNÓSTICO DE API KEYS ═══")

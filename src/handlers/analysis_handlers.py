@@ -820,7 +820,15 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     # Value bets (v2: con Kelly Criterion)
     suggestions = find_value_bets(probs, odds)
 
-    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+    # Line movement: obtener historial de odds si existe
+    try:
+        from src.models.database import get_odds_history
+        odds_hist = await get_odds_history(f"{home_name} vs {away_name}")
+    except Exception:
+        odds_hist = None
+
+    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
+                                    odds_history=odds_hist)
 
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
