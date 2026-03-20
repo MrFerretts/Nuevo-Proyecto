@@ -866,6 +866,21 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
                                     odds_history=odds_hist)
 
+    # Análisis IA (cerebro contextual)
+    ai = get_ai_service()
+    if ai:
+        try:
+            ai_text, brain_data = await ai.generate_ai_analysis(
+                home_analysis, away_analysis, h2h, probs, suggestions,
+                league_name=LEAGUE_NAMES.get(league_id, ""),
+                odds=odds,
+                line_movement=odds_hist,
+            )
+            if ai_text and isinstance(ai_text, str):
+                report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        except Exception as e:
+            logger.warning(f"AI brain analysis error: {e}")
+
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
     fd_match_id = fixture.get("_fd_match_id")
@@ -987,11 +1002,23 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
 
+    # Análisis IA (cerebro contextual)
+    ai = get_ai_service()
+    if ai:
+        try:
+            ai_text, brain_data = await ai.generate_ai_analysis(
+                home_analysis, away_analysis, h2h, probs, suggestions,
+                league_name=LEAGUE_NAMES.get(league_id, ""),
+                odds=odds,
+            )
+            if ai_text and isinstance(ai_text, str):
+                report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        except Exception as e:
+            logger.warning(f"AI brain analysis error (fallback): {e}")
+
     # Guardar predicción para tracking
     match_date = fixture.get("fixture", {}).get("date", "")
     await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions)
-
-    # Análisis IA deshabilitado — no aporta valor con Groq/Llama
 
     # Metadata para botones de apuesta rápida
     match_name = f"{home_name} vs {away_name}"
