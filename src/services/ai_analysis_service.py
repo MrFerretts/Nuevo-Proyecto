@@ -84,6 +84,65 @@ class AIAnalysisService:
         logger.error("Groq: todos los modelos fallaron")
         return None
 
+    async def _call_groq_fast(self, prompt: str, max_tokens: int = 100) -> str | None:
+        """Llamada rápida a Groq usando solo el modelo 8B (para clasificación)."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": GROQ_MODEL_FALLBACK,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0,
+                }
+                async with session.post(
+                    GROQ_API_URL, headers=headers, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = json.loads(await resp.text())
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content")
+        except Exception as e:
+            logger.error(f"Groq fast: error: {e}")
+        return None
+
+    async def classify_intent(self, user_message: str) -> dict | None:
+        """Clasifica la intención del usuario con el modelo 8B rápido.
+
+        Returns: {"intent": "bet", "params": "50 al barca over 1.5 x3"} o None.
+        """
+        if not self.api_key:
+            return None
+
+        prompt = f"""Clasifica la intención del usuario. Responde SOLO con JSON válido (sin markdown).
+
+Intenciones:
+- "analyze": quiere analizar un partido o equipo ("analiza el barca", "cómo ves el liverpool vs arsenal", "análisis del madrid")
+- "bet": quiere registrar UNA apuesta ("le meto 50 al man u", "apuesto 30 al over 2.5")
+- "parlay": quiere una combinada de 2+ picks ("combinada barca + liverpool", "parlay man u y btts juve")
+- "resolve": reporta resultado de apuesta ("gané la del barca", "perdí el over", "acerté todas")
+- "bankroll": quiere ver su bankroll/plata ("cómo va mi bankroll", "cuánto tengo")
+- "stats": quiere estadísticas o rendimiento ("mis stats", "cómo voy", "mi rendimiento", "racha")
+- "my_bets": ver apuestas pendientes o historial ("mis apuestas", "qué tengo pendiente")
+- "opportunities": buscar qué apostar hoy ("qué hay para hoy", "mejores apuestas", "oportunidades")
+- "help": ayuda o preguntas sobre el bot ("ayuda", "qué puedes hacer")
+- "chat": conversación general, saludos, opiniones ("hola", "qué opinas de messi", "crees que el barca gana la liga")
+
+Mensaje: "{user_message}"
+
+{{"intent": "...", "params": "..."}}"""
+
+        result = await self._call_groq_fast(prompt, max_tokens=100)
+        if not result:
+            return None
+        return self._clean_json(result)
+
     async def generate_ai_analysis(
         self,
         home: TeamAnalysis,

@@ -31,6 +31,7 @@ from src.handlers.analysis_handlers import (
     quick_bet_callback, quick_bet_stake_callback,
     SELECT_LEAGUE, SELECT_MATCH,
 )
+from src.handlers.router_handler import router_handler
 from src.handlers.bankroll_handlers import (
     bankroll_command, set_bankroll_command,
     bet_command, confirm_bet_callback,
@@ -122,6 +123,9 @@ def main():
     app.add_handler(CallbackQueryHandler(parlay_stake_callback, pattern=r"^parlaystake_"))
     app.add_handler(CallbackQueryHandler(confirm_parlay_callback, pattern=r"^confirmparlay_"))
     app.add_handler(CallbackQueryHandler(confirm_result_callback, pattern=r"^confirmresult_"))
+
+    # Router conversacional IA (catch-all para texto sin /comando)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router_handler))
 
     # Callback queries genérico (botones inline)
     app.add_handler(CallbackQueryHandler(button_callback))
