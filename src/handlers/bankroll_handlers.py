@@ -729,29 +729,43 @@ async def resolve_bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Resolver múltiples apuestas
+    # Resolver múltiples apuestas → pedir confirmación
     if "bets" in parsed:
-        results_text = ""
-        for item in parsed["bets"]:
-            bet_id = item.get("bet_id")
-            result = item.get("result", "").lower()
-            if bet_id and result in ("win", "loss", "void"):
-                res = await resolve_user_bet(bet_id, result)
-                if res:
-                    p = res["profit"]
-                    sign = "+" if p >= 0 else ""
-                    emoji = {"win": "✅", "loss": "❌", "void": "↩️"}.get(result, "")
-                    results_text += f"{emoji} #{bet_id} {res['bet']['match_name']}: {sign}${p:.2f}\n"
+        items = parsed["bets"]
+        # Validar
+        valid = [
+            item for item in items
+            if item.get("bet_id") and item.get("result", "").lower() in ("win", "loss", "void")
+        ]
+        if not valid:
+            await msg.edit_text("❌ No pude determinar los resultados. Intenta de nuevo.")
+            return
 
-        br = await get_or_create_bankroll(user_id)
+        # Guardar para confirmación
+        context.user_data["confirm_results"] = valid
+
+        emoji_map = {"win": "✅", "loss": "❌", "void": "↩️"}
+        preview = ""
+        pending_dict = {b["id"]: b for b in pending}
+        for item in valid:
+            bid = item["bet_id"]
+            res = item["result"].lower()
+            bet_info = pending_dict.get(bid)
+            name = bet_info["match_name"] if bet_info else f"#{bid}"
+            preview += f"  {emoji_map.get(res, '?')} #{bid} {name} → *{res.upper()}*\n"
+
+        keyboard = [[
+            InlineKeyboardButton("✅ Confirmar", callback_data="confirmresult_yes"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="confirmresult_no"),
+        ]]
         await msg.edit_text(
-            f"📊 *RESULTADOS ACTUALIZADOS*\n{'─' * 28}\n{results_text}\n"
-            f"💼 Bankroll: *${br['current_bankroll']:.2f}*",
+            f"📊 *¿Confirmas estos resultados?*\n{'─' * 28}\n{preview}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown",
         )
         return
 
-    # Resolver una sola apuesta
+    # Resolver una sola apuesta → pedir confirmación
     bet_id = parsed.get("bet_id")
     result = (parsed.get("result") or "").lower()
 
@@ -759,8 +773,59 @@ async def resolve_bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.edit_text("❌ No pude determinar el resultado. Intenta de nuevo.")
         return
 
-    await msg.delete()
-    await _resolve_and_reply(update, bet_id, result)
+    context.user_data["confirm_results"] = [{"bet_id": bet_id, "result": result}]
+
+    emoji_map = {"win": "✅", "loss": "❌", "void": "↩️"}
+    pending_dict = {b["id"]: b for b in pending}
+    bet_info = pending_dict.get(bet_id)
+    name = bet_info["match_name"] if bet_info else f"#{bet_id}"
+
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirmar", callback_data="confirmresult_yes"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="confirmresult_no"),
+    ]]
+    await msg.edit_text(
+        f"📊 *¿Confirmas este resultado?*\n{'─' * 28}\n"
+        f"  {emoji_map.get(result, '?')} #{bet_id} {name} → *{result.upper()}*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def confirm_result_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirma o cancela la resolución de apuestas."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "confirmresult_no":
+        context.user_data.pop("confirm_results", None)
+        await query.edit_message_text("❌ Resultado cancelado. La apuesta sigue pendiente.")
+        return
+
+    items = context.user_data.pop("confirm_results", None)
+    if not items:
+        await query.edit_message_text("❌ No hay resultados pendientes de confirmar.")
+        return
+
+    user_id = query.from_user.id
+    emoji_map = {"win": "✅", "loss": "❌", "void": "↩️"}
+    results_text = ""
+
+    for item in items:
+        bet_id = item["bet_id"]
+        result = item["result"].lower()
+        res = await resolve_user_bet(bet_id, result)
+        if res:
+            p = res["profit"]
+            sign = "+" if p >= 0 else ""
+            results_text += f"{emoji_map.get(result, '?')} #{bet_id} {res['bet']['match_name']}: {sign}${p:.2f}\n"
+
+    br = await get_or_create_bankroll(user_id)
+    await query.edit_message_text(
+        f"📊 *RESULTADOS ACTUALIZADOS*\n{'─' * 28}\n{results_text}\n"
+        f"💼 Bankroll: *${br['current_bankroll']:.2f}*",
+        parse_mode="Markdown",
+    )
 
 
 async def _resolve_and_reply(update: Update, bet_id: int, result: str):
