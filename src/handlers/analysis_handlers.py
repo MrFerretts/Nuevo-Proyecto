@@ -61,11 +61,16 @@ ai_service = None
 
 
 def get_ai_service() -> AIAnalysisService | None:
-    """Obtiene AIAnalysisService si hay API key configurada."""
+    """Obtiene AIAnalysisService con el mejor backend disponible."""
     global ai_service
-    if ai_service is None and GROQ_API_KEY:
+    from src.config import ANTHROPIC_API_KEY
+    if ai_service is None and (GROQ_API_KEY or ANTHROPIC_API_KEY):
         ai_service = AIAnalysisService(GROQ_API_KEY)
-        logger.info("AI Analysis Service inicializado (Groq)")
+        if ANTHROPIC_API_KEY:
+            ai_service.anthropic_key = ANTHROPIC_API_KEY
+            logger.info("AI Brain: Claude (Anthropic) + Groq fallback")
+        else:
+            logger.info("AI Brain: Groq (Llama) — para mejor análisis, agrega ANTHROPIC_API_KEY")
     return ai_service
 
 
@@ -827,28 +832,63 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     except Exception:
         odds_hist = None
 
+    # === CEREBRO IA: Analiza contexto y ajusta probabilidades ===
+    ai = get_ai_service()
+    brain_data = None
+    ai_text = None
+    logger.info(f"AI service disponible: {ai is not None}, GROQ_API_KEY: {bool(GROQ_API_KEY)}")
+
+    if ai:
+        # Configurar Anthropic si disponible
+        from src.config import ANTHROPIC_API_KEY
+        if ANTHROPIC_API_KEY:
+            ai.anthropic_key = ANTHROPIC_API_KEY
+
+        league_name = LEAGUE_NAMES.get(league_id, "")
+        ai_result = await ai.generate_ai_analysis(
+            home_analysis, away_analysis, h2h, probs, suggestions,
+            league_name, odds=odds, line_movement=odds_hist,
+        )
+
+        if ai_result:
+            ai_text, brain_data = ai_result
+
+        # Si el cerebro IA produjo ajustes, aplicarlos a las probabilidades
+        if brain_data and brain_data.get("prob_adjustments"):
+            adj = brain_data["prob_adjustments"]
+            logger.info(f"Brain adjustments: home={adj.get('home_win', 0):+.3f}, "
+                        f"draw={adj.get('draw', 0):+.3f}, away={adj.get('away_win', 0):+.3f}")
+
+            probs["home_win"] += adj.get("home_win", 0)
+            probs["draw"] += adj.get("draw", 0)
+            probs["away_win"] += adj.get("away_win", 0)
+
+            # Re-normalizar
+            total = probs["home_win"] + probs["draw"] + probs["away_win"]
+            probs["home_win"] /= total
+            probs["draw"] /= total
+            probs["away_win"] /= total
+            probs["home_or_draw"] = probs["home_win"] + probs["draw"]
+            probs["away_or_draw"] = probs["away_win"] + probs["draw"]
+            probs["home_or_away"] = probs["home_win"] + probs["away_win"]
+
+            # Re-calcular value bets con probabilidades ajustadas por IA
+            suggestions = find_value_bets(probs, odds)
+            logger.info(f"Value bets recalculados con ajustes IA: {len(suggestions)} encontrados")
+    else:
+        logger.info("Saltando análisis IA (no hay GROQ_API_KEY o servicio no inicializado)")
+
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
                                     odds_history=odds_hist)
+
+    # Agregar análisis IA al reporte
+    if ai_text:
+        report += f"\n\n{'═' * 28}\n\n{ai_text}"
 
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
     fd_match_id = fixture.get("_fd_match_id")
     await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions, fd_match_id=fd_match_id)
-
-    # Análisis con IA (si está configurado)
-    ai = get_ai_service()
-    logger.info(f"AI service disponible: {ai is not None}, GROQ_API_KEY configurada: {bool(GROQ_API_KEY)}")
-    if ai:
-        league_name = LEAGUE_NAMES.get(league_id, "")
-        ai_text = await ai.generate_ai_analysis(
-            home_analysis, away_analysis, h2h, probs, suggestions, league_name
-        )
-        if ai_text:
-            report += f"\n\n{'═' * 28}\n\n{ai_text}"
-        else:
-            logger.warning("AI analysis retornó None - revisa logs de Groq arriba")
-    else:
-        logger.info("Saltando análisis IA (no hay GROQ_API_KEY o servicio no inicializado)")
 
     # Guardar metadata para botones de apuesta rápida
     match_name = f"{home_name} vs {away_name}"

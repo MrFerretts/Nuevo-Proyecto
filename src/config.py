@@ -11,6 +11,7 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "")
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 VIP_PRICE = float(os.getenv("VIP_PRICE", "9.99"))
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "")
 
