@@ -850,8 +850,10 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
             league_name, odds=odds, line_movement=odds_hist,
         )
 
-        if ai_result:
+        if isinstance(ai_result, tuple):
             ai_text, brain_data = ai_result
+        elif isinstance(ai_result, str):
+            ai_text = ai_result
 
         # Si el cerebro IA produjo ajustes, aplicarlos a las probabilidades
         if brain_data and brain_data.get("prob_adjustments"):
@@ -1003,9 +1005,14 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     logger.info(f"[fullback] AI service disponible: {ai is not None}")
     if ai:
         league_name = LEAGUE_NAMES.get(league_id, "")
-        ai_text = await ai.generate_ai_analysis(
+        ai_result = await ai.generate_ai_analysis(
             home_analysis, away_analysis, h2h, probs, suggestions, league_name
         )
+        ai_text = None
+        if isinstance(ai_result, tuple):
+            ai_text, _ = ai_result
+        elif isinstance(ai_result, str):
+            ai_text = ai_result
         if ai_text:
             report += f"\n\n{'═' * 28}\n\n{ai_text}"
         else:

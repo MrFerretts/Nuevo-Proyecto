@@ -271,47 +271,81 @@ REGLAS PARA LOS AJUSTES:
 - Sé conservador. Mejor dejar pasar una oportunidad que recomendar mal."""
 
     def _parse_brain_output(self, text: str) -> dict | None:
-        """Parsea la respuesta JSON del cerebro IA."""
+        """Parsea la respuesta JSON del cerebro IA — muy tolerante con formatos."""
         try:
             cleaned = text.strip()
-            # Limpiar posible markdown
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
-            cleaned = cleaned.strip()
+
+            # Limpiar markdown code blocks
+            if "```" in cleaned:
+                # Extraer contenido entre ``` bloques
+                import re
+                match = re.search(r"```(?:json)?\s*\n?(.*?)```", cleaned, re.DOTALL)
+                if match:
+                    cleaned = match.group(1).strip()
+                else:
+                    # Quitar solo los markers
+                    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+            # Buscar el primer { y último } por si hay texto antes/después
+            first_brace = cleaned.find("{")
+            last_brace = cleaned.rfind("}")
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                cleaned = cleaned[first_brace:last_brace + 1]
 
             data = json.loads(cleaned)
 
-            # Validar estructura mínima
+            # Validar estructura mínima — ser flexible
             if "prob_adjustments" not in data:
-                logger.warning("Brain: respuesta sin prob_adjustments")
-                return None
+                # Intentar crear uno por defecto
+                data["prob_adjustments"] = {"home_win": 0, "draw": 0, "away_win": 0, "reasoning": ""}
+                logger.warning("Brain: sin prob_adjustments, usando defaults")
+
             if "best_bet" not in data:
-                logger.warning("Brain: respuesta sin best_bet")
-                return None
+                data["best_bet"] = {"pick": "NINGUNA", "conviction": 3, "reason": "Datos insuficientes"}
+                logger.warning("Brain: sin best_bet, usando default")
 
             # Validar que adjustments suman ~0
             adj = data["prob_adjustments"]
-            total_adj = adj.get("home_win", 0) + adj.get("draw", 0) + adj.get("away_win", 0)
+            for key in ["home_win", "draw", "away_win"]:
+                if key not in adj:
+                    adj[key] = 0
+                # Asegurar que es número
+                try:
+                    adj[key] = float(adj[key])
+                except (ValueError, TypeError):
+                    adj[key] = 0
+
+            total_adj = adj["home_win"] + adj["draw"] + adj["away_win"]
             if abs(total_adj) > 0.02:
-                logger.warning(f"Brain: adjustments no suman 0 (sum={total_adj:.3f}), normalizando")
-                # Normalizar
+                logger.info(f"Brain: normalizando adjustments (sum={total_adj:.3f})")
                 for key in ["home_win", "draw", "away_win"]:
-                    adj[key] = adj.get(key, 0) - total_adj / 3
+                    adj[key] -= total_adj / 3
 
             # Clamp adjustments
             for key in ["home_win", "draw", "away_win"]:
-                adj[key] = max(-0.08, min(0.08, adj.get(key, 0)))
+                adj[key] = max(-0.08, min(0.08, adj[key]))
 
             # Clamp conviction
-            if "best_bet" in data:
-                data["best_bet"]["conviction"] = max(0, min(10, data["best_bet"].get("conviction", 5)))
+            try:
+                data["best_bet"]["conviction"] = max(0, min(10, int(data["best_bet"].get("conviction", 5))))
+            except (ValueError, TypeError):
+                data["best_bet"]["conviction"] = 5
 
+            # Asegurar campos de texto
+            if "analysis_text" not in data:
+                data["analysis_text"] = ""
+            if "hidden_factors" not in data:
+                data["hidden_factors"] = []
+            if "value_bets_evaluation" not in data:
+                data["value_bets_evaluation"] = []
+            if "risk_warnings" not in data:
+                data["risk_warnings"] = []
+
+            logger.info(f"Brain: JSON parseado OK, conviction={data['best_bet']['conviction']}")
             return data
 
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Brain: JSON inválido: {text[:300]} - {e}")
+            logger.error(f"Brain: JSON inválido — {e}\nRespuesta: {text[:500]}")
             return None
 
     async def _call_anthropic(self, prompt: str, max_tokens: int = 1200) -> str | None:
