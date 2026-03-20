@@ -66,7 +66,7 @@ async def _dispatch(
         bankroll_command, my_bets_command, rendimiento_command,
     )
     from src.handlers.analysis_handlers import (
-        analyze_command, opportunities_command,
+        analyze_command, opportunities_command, matches_command,
     )
     from src.handlers.user_handlers import help_command, chat_command
 
@@ -80,6 +80,7 @@ async def _dispatch(
         "bankroll": bankroll_command,
         "my_bets": my_bets_command,
         "stats": rendimiento_command,
+        "matches": matches_command,
         "opportunities": opportunities_command,
         "help": help_command,
     }

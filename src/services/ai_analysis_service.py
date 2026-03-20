@@ -123,7 +123,8 @@ class AIAnalysisService:
         prompt = f"""Clasifica la intención del usuario. Responde SOLO con JSON válido (sin markdown).
 
 Intenciones:
-- "analyze": quiere analizar un partido o equipo ("analiza el barca", "cómo ves el liverpool vs arsenal", "análisis del madrid")
+- "matches": quiere ver la lista de próximos partidos de una liga o en general ("partidos de la premier", "qué partidos hay mañana", "calendario de la liga", "próximos partidos champions", "qué juegos hay hoy")
+- "analyze": quiere analizar un partido o equipo ESPECÍFICO en profundidad ("analiza el barca vs madrid", "cómo ves el liverpool vs arsenal", "análisis del madrid mañana")
 - "bet": quiere registrar UNA apuesta ("le meto 50 al man u", "apuesto 30 al over 2.5")
 - "parlay": quiere una combinada de 2+ picks ("combinada barca + liverpool", "parlay man u y btts juve")
 - "resolve": reporta resultado de apuesta ("gané la del barca", "perdí el over", "acerté todas")

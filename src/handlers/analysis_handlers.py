@@ -1188,6 +1188,85 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(text, parse_mode="Markdown")
 
 
+# Aliases de ligas para reconocimiento por IA
+_LEAGUE_ALIASES = {
+    "premier": 39, "premier league": 39, "pl": 39, "epl": 39, "england": 39, "inglaterra": 39,
+    "la liga": 140, "liga": 140, "españa": 140, "spain": 140, "laliga": 140, "liga española": 140,
+    "serie a": 135, "seriea": 135, "italia": 135, "italy": 135,
+    "bundesliga": 78, "buli": 78, "alemania": 78, "germany": 78,
+    "ligue 1": 61, "ligue1": 61, "francia": 61, "france": 61,
+    "champions": 2, "champions league": 2, "ucl": 2, "cl": 2,
+}
+
+
+def _resolve_league(text: str) -> tuple[int | None, str | None]:
+    """Resuelve una liga a partir de texto libre."""
+    text_lower = text.lower().strip()
+    for alias, lid in _LEAGUE_ALIASES.items():
+        if alias in text_lower:
+            return lid, LEAGUE_NAMES.get(lid, alias)
+    return None, None
+
+
+async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista los próximos partidos de una liga o de todas."""
+    text = " ".join(context.args) if context.args else ""
+
+    league_id, league_name = _resolve_league(text)
+
+    if league_id:
+        leagues_to_check = [(league_id, league_name)]
+    else:
+        leagues_to_check = list(LEAGUE_NAMES.items())
+
+    await update.message.reply_text("⏳ Buscando próximos partidos...")
+
+    lines = []
+    for lid, lname in leagues_to_check:
+        try:
+            if not can_use_fd(lid):
+                continue
+            fd = get_fd_service()
+            comp_code = COMPETITION_MAP[lid]
+            matches = await fd.get_upcoming_matches(comp_code, limit=10 if league_id else 5)
+            if not matches:
+                continue
+
+            lines.append(f"\n🏆 *{lname}*")
+            for m in matches:
+                home = m.get("homeTeam", {}).get("name", "?")
+                away = m.get("awayTeam", {}).get("name", "?")
+                utc_date = m.get("utcDate", "")
+                # Formatear fecha legible
+                try:
+                    dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
+                    date_str = dt.strftime("%a %d/%m %H:%M")
+                except Exception:
+                    date_str = utc_date[:16] if utc_date else "?"
+                lines.append(f"  ⚽ {home} vs {away} — {date_str}")
+        except Exception as e:
+            logger.warning(f"Error cargando partidos de {lname}: {e}")
+            continue
+
+    if not lines:
+        await update.message.reply_text(
+            "😕 No encontré partidos próximos. Intenta con una liga específica:\n"
+            "_\"partidos de la premier\"_, _\"partidos champions\"_",
+            parse_mode="Markdown",
+        )
+        return
+
+    header = f"📅 *Próximos partidos — {league_name}*" if league_id else "📅 *Próximos partidos*"
+    result = header + "\n" + "\n".join(lines)
+
+    if len(result) > 4000:
+        parts = [result[i:i + 4000] for i in range(0, len(result), 4000)]
+        for part in parts:
+            await update.message.reply_text(part, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(result, parse_mode="Markdown")
+
+
 async def cancel_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Análisis cancelado.")
     return ConversationHandler.END
