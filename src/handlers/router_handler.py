@@ -9,6 +9,7 @@ Ejemplos:
   "gané la del liverpool" → resuelve apuesta
   "cómo va mi bankroll" → muestra bankroll
   "arma un parlay barca + liverpool" → crea combinada
+  "partidos de la premier" → lista partidos próximos
 """
 
 import logging
@@ -32,23 +33,29 @@ async def router_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not GROQ_API_KEY:
-        # Sin IA, no podemos rutear - ignorar mensajes sueltos
         return
 
-    ai = AIAnalysisService(GROQ_API_KEY)
-    result = await ai.classify_intent(user_text)
+    try:
+        ai = AIAnalysisService(GROQ_API_KEY)
+        result = await ai.classify_intent(user_text)
 
-    if not result or "intent" not in result:
-        # Fallback: tratar como chat general
-        result = {"intent": "chat", "params": user_text}
+        if not result or "intent" not in result:
+            result = {"intent": "chat", "params": user_text}
 
-    intent = result.get("intent", "chat")
-    params = result.get("params", user_text) or user_text
+        intent = result.get("intent", "chat")
+        params = result.get("params", user_text) or user_text
 
-    logger.info(f"Router: '{user_text[:50]}' → intent={intent}")
+        logger.info(f"Router: '{user_text[:50]}' → intent={intent}, params='{params[:50]}'")
 
-    # Dispatch por intención
-    await _dispatch(intent, params, user_text, update, context)
+        await _dispatch(intent, params, user_text, update, context)
+
+    except Exception as e:
+        logger.error(f"Router: error procesando '{user_text[:50]}': {e}", exc_info=True)
+        await update.message.reply_text(
+            f"⚠️ Error procesando tu mensaje. Intenta de nuevo o usa un /comando.\n"
+            f"_Detalle: {str(e)[:100]}_",
+            parse_mode="Markdown",
+        )
 
 
 async def _dispatch(
@@ -60,7 +67,6 @@ async def _dispatch(
 ):
     """Ejecuta el handler correspondiente a la intención detectada."""
 
-    # Importar aquí para evitar imports circulares
     from src.handlers.bankroll_handlers import (
         bet_command, parlay_command, resolve_bet_command,
         bankroll_command, my_bets_command, rendimiento_command,
@@ -92,11 +98,10 @@ async def _dispatch(
         return
 
     if intent == "analyze":
-        # Análisis usa ConversationHandler pero el path con args es self-contained
         context.args = params.split() if params else []
         await analyze_command(update, context)
         return
 
-    # Default: chat general
+    # Default: chat general con el texto original completo
     context.args = original_text.split()
     await chat_command(update, context)

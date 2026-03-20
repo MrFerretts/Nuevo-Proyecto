@@ -13,12 +13,18 @@ Requiere: GROQ_API_KEY en .env (gratis en https://console.groq.com/)
 
 import json
 import logging
+import time
 
 import aiohttp
 
 from src.services.analysis_engine import TeamAnalysis, BetSuggestion
 
 logger = logging.getLogger(__name__)
+
+# Caché de análisis IA: evita resultados diferentes para el mismo partido en pocos minutos
+# Formato: {"home vs away": {"text": "...", "timestamp": float}}
+_analysis_cache: dict[str, dict] = {}
+_CACHE_TTL = 900  # 15 minutos
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -47,7 +53,7 @@ class AIAnalysisService:
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
                         "max_tokens": max_tokens,
-                        "temperature": 0.7,
+                        "temperature": 0.3,
                     }
 
                     logger.info(f"Groq: llamando modelo {model}...")
@@ -161,11 +167,24 @@ Mensaje: "{user_message}"
             logger.warning("Groq: no hay API key configurada, saltando análisis IA")
             return None
 
+        # Caché: si ya analizamos este partido recientemente, devolver lo mismo
+        cache_key = f"{home.name} vs {away.name}".lower()
+        cached = _analysis_cache.get(cache_key)
+        if cached and (time.time() - cached["timestamp"]) < _CACHE_TTL:
+            logger.info(f"Groq: usando análisis cacheado para {cache_key}")
+            return cached["text"]
+
         logger.info(f"Groq: generando análisis IA para {home.name} vs {away.name}...")
         prompt = self._build_prompt(home, away, h2h, probs, suggestions, league_name)
         result = await self._call_groq(prompt, max_tokens=800)
         if result:
             logger.info(f"Groq: análisis generado OK ({len(result)} chars)")
+            _analysis_cache[cache_key] = {"text": result, "timestamp": time.time()}
+            # Limpiar entradas viejas del caché
+            now = time.time()
+            expired = [k for k, v in _analysis_cache.items() if now - v["timestamp"] > _CACHE_TTL]
+            for k in expired:
+                del _analysis_cache[k]
         else:
             logger.warning("Groq: no se pudo generar análisis IA")
         return result
