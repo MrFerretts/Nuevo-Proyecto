@@ -71,7 +71,15 @@ async def init_db():
             )
         """)
         # Migración: agregar columnas nuevas a tablas existentes
-        for col, coltype in [("fd_match_id", "INTEGER"), ("league_id", "INTEGER DEFAULT 0")]:
+        for col, coltype in [
+            ("fd_match_id", "INTEGER"),
+            ("league_id", "INTEGER DEFAULT 0"),
+            # Per-market correctness tracking (learning system)
+            ("result_correct", "INTEGER"),      # 1X2 correct?
+            ("over25_correct", "INTEGER"),       # Over 2.5 correct?
+            ("btts_correct", "INTEGER"),         # BTTS correct?
+            ("actual_total_goals", "INTEGER"),   # Total goals for quick queries
+        ]:
             try:
                 await db.execute(f"ALTER TABLE predictions ADD COLUMN {col} {coltype}")
             except Exception:
@@ -324,7 +332,11 @@ async def save_prediction(match_name: str, league: str, match_date: str,
 
 
 async def resolve_prediction(prediction_id: int, home_goals: int, away_goals: int):
-    """Resuelve una predicción con el resultado real y calcula si acertó."""
+    """Resuelve una predicción evaluando TODOS los mercados (no solo el pick principal).
+
+    Evalúa: resultado 1X2, Over/Under 2.5, BTTS — independientemente del pick sugerido.
+    Esto permite al modelo aprender de cada predicción y calibrarse con el tiempo.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         # Obtener la predicción
         db.row_factory = aiosqlite.Row
@@ -346,14 +358,35 @@ async def resolve_prediction(prediction_id: int, home_goals: int, away_goals: in
 
         total_goals = home_goals + away_goals
 
-        # Verificar si la predicción principal fue correcta
+        # ── Evaluar CADA mercado independientemente ──
+
+        # 1X2: ¿acertó el resultado?
+        highest_1x2 = max(
+            ("home_win", pred["home_win_prob"]),
+            ("draw", pred["draw_prob"]),
+            ("away_win", pred["away_win_prob"]),
+            key=lambda x: x[1],
+        )
+        result_correct = 1 if highest_1x2[0] == actual_result else 0
+
+        # Over 2.5: ¿acertó?
+        over25_prob = pred["over25_prob"] or 0
+        actual_over25 = total_goals > 2.5
+        # El modelo predijo over si prob > 50%
+        over25_correct = 1 if (over25_prob > 0.5) == actual_over25 else 0
+
+        # BTTS: ¿acertó?
+        btts_prob = pred["btts_prob"] or 0
+        actual_btts = home_goals > 0 and away_goals > 0
+        btts_correct = 1 if (btts_prob > 0.5) == actual_btts else 0
+
+        # Verificar si el pick principal fue correcto (para compatibilidad)
         was_correct = 0
         profit = 0.0
         pick = pred["predicted_pick"]
         odds = pred["predicted_odds"]
 
         if pick:
-            # Evaluar según el tipo de apuesta
             correct_map = {
                 "Victoria Local": actual_result == "home_win",
                 "Empate": actual_result == "draw",
@@ -376,9 +409,15 @@ async def resolve_prediction(prediction_id: int, home_goals: int, away_goals: in
         await db.execute(
             """UPDATE predictions SET
                actual_result = ?, actual_home_goals = ?, actual_away_goals = ?,
-               was_correct = ?, profit = ?, resolved_at = CURRENT_TIMESTAMP
+               actual_total_goals = ?,
+               was_correct = ?, profit = ?,
+               result_correct = ?, over25_correct = ?, btts_correct = ?,
+               resolved_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            (actual_result, home_goals, away_goals, was_correct, profit, prediction_id),
+            (actual_result, home_goals, away_goals, total_goals,
+             was_correct, profit,
+             result_correct, over25_correct, btts_correct,
+             prediction_id),
         )
         await db.commit()
 
@@ -467,6 +506,27 @@ async def get_prediction_accuracy(days: int = 30) -> dict:
         ) as cursor:
             pending = (await cursor.fetchone())[0]
 
+        # Per-market accuracy (new learning system)
+        per_market = {}
+        with_result = [p for p in predictions if p.get("result_correct") is not None]
+        if with_result:
+            per_market["1x2"] = {
+                "total": len(with_result),
+                "correct": sum(1 for p in with_result if p["result_correct"]),
+            }
+        with_over25 = [p for p in predictions if p.get("over25_correct") is not None]
+        if with_over25:
+            per_market["over25"] = {
+                "total": len(with_over25),
+                "correct": sum(1 for p in with_over25 if p["over25_correct"]),
+            }
+        with_btts = [p for p in predictions if p.get("btts_correct") is not None]
+        if with_btts:
+            per_market["btts"] = {
+                "total": len(with_btts),
+                "correct": sum(1 for p in with_btts if p["btts_correct"]),
+            }
+
         return {
             "total": total,
             "pending": pending,
@@ -478,7 +538,153 @@ async def get_prediction_accuracy(days: int = 30) -> dict:
             "by_confidence": by_confidence,
             "by_market": by_market,
             "calibration": calibration,
+            "per_market": per_market,
         }
+
+
+async def get_per_market_calibration(league_id: int = 0, days: int = 60) -> dict:
+    """Calcula el sesgo (bias) del modelo por mercado comparando probabilidades predichas vs resultados reales.
+
+    Esto permite al modelo APRENDER: si sistemáticamente sobreestima Over 2.5,
+    el sesgo negativo corregirá futuras predicciones.
+
+    Returns: {
+        "1x2": {"total": N, "correct": N, "accuracy": 0.X, "bias": +/-0.XX},
+        "over25": {"total": N, "correct": N, "accuracy": 0.X, "avg_predicted": 0.X, "avg_actual": 0.X, "bias": +/-0.XX},
+        "btts": {"total": N, "correct": N, "accuracy": 0.X, "avg_predicted": 0.X, "avg_actual": 0.X, "bias": +/-0.XX},
+        "xg": {"avg_predicted": X.X, "avg_actual": X.X, "bias": +/-X.X},
+        "sample_size": N,
+    }
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Filtrar por liga si se especifica, sino todas
+        if league_id > 0:
+            query = """SELECT * FROM predictions
+                       WHERE resolved_at IS NOT NULL
+                       AND league_id = ?
+                       AND created_at >= datetime('now', ? || ' days')
+                       ORDER BY created_at DESC"""
+            params = (league_id, f"-{days}")
+        else:
+            query = """SELECT * FROM predictions
+                       WHERE resolved_at IS NOT NULL
+                       AND created_at >= datetime('now', ? || ' days')
+                       ORDER BY created_at DESC"""
+            params = (f"-{days}",)
+
+        async with db.execute(query, params) as cursor:
+            predictions = [dict(r) for r in await cursor.fetchall()]
+
+    if not predictions:
+        return {"sample_size": 0}
+
+    result = {"sample_size": len(predictions)}
+
+    # ── 1X2 Accuracy ──
+    with_result = [p for p in predictions if p.get("result_correct") is not None]
+    if with_result:
+        correct_1x2 = sum(1 for p in with_result if p["result_correct"])
+        result["1x2"] = {
+            "total": len(with_result),
+            "correct": correct_1x2,
+            "accuracy": correct_1x2 / len(with_result),
+        }
+    else:
+        # Fallback: calcular desde probabilidades para predicciones antiguas (sin result_correct)
+        calc_1x2 = []
+        for p in predictions:
+            if p.get("actual_result") and p.get("home_win_prob"):
+                best = max(
+                    ("home_win", p["home_win_prob"]),
+                    ("draw", p["draw_prob"]),
+                    ("away_win", p["away_win_prob"]),
+                    key=lambda x: x[1],
+                )
+                calc_1x2.append(1 if best[0] == p["actual_result"] else 0)
+        if calc_1x2:
+            result["1x2"] = {
+                "total": len(calc_1x2),
+                "correct": sum(calc_1x2),
+                "accuracy": sum(calc_1x2) / len(calc_1x2),
+            }
+
+    # ── Over 2.5 Calibration ──
+    over25_data = [p for p in predictions if p.get("over25_prob", 0) > 0 and p.get("actual_total_goals") is not None]
+    if not over25_data:
+        # Fallback: calcular desde goles para predicciones antiguas
+        over25_data = [p for p in predictions
+                       if p.get("over25_prob", 0) > 0
+                       and p.get("actual_home_goals") is not None
+                       and p.get("actual_away_goals") is not None]
+        for p in over25_data:
+            p["actual_total_goals"] = (p["actual_home_goals"] or 0) + (p["actual_away_goals"] or 0)
+
+    if over25_data:
+        avg_predicted_over25 = sum(p["over25_prob"] for p in over25_data) / len(over25_data)
+        actual_over25_rate = sum(1 for p in over25_data if p["actual_total_goals"] > 2.5) / len(over25_data)
+        over25_correct = sum(
+            1 for p in over25_data
+            if (p["over25_prob"] > 0.5) == (p["actual_total_goals"] > 2.5)
+        )
+        result["over25"] = {
+            "total": len(over25_data),
+            "correct": over25_correct,
+            "accuracy": over25_correct / len(over25_data),
+            "avg_predicted": avg_predicted_over25,
+            "avg_actual": actual_over25_rate,
+            "bias": avg_predicted_over25 - actual_over25_rate,  # Positivo = sobreestima
+        }
+
+    # ── BTTS Calibration ──
+    btts_data = [p for p in predictions
+                 if p.get("btts_prob", 0) > 0
+                 and p.get("actual_home_goals") is not None
+                 and p.get("actual_away_goals") is not None]
+    if btts_data:
+        avg_predicted_btts = sum(p["btts_prob"] for p in btts_data) / len(btts_data)
+        actual_btts_rate = sum(
+            1 for p in btts_data
+            if (p["actual_home_goals"] or 0) > 0 and (p["actual_away_goals"] or 0) > 0
+        ) / len(btts_data)
+        btts_correct = sum(
+            1 for p in btts_data
+            if (p["btts_prob"] > 0.5) == ((p["actual_home_goals"] or 0) > 0 and (p["actual_away_goals"] or 0) > 0)
+        )
+        result["btts"] = {
+            "total": len(btts_data),
+            "correct": btts_correct,
+            "accuracy": btts_correct / len(btts_data),
+            "avg_predicted": avg_predicted_btts,
+            "avg_actual": actual_btts_rate,
+            "bias": avg_predicted_btts - actual_btts_rate,
+        }
+
+    # ── xG Calibration ──
+    xg_data = [p for p in predictions
+                if p.get("home_xg", 0) > 0
+                and p.get("actual_total_goals") is not None]
+    if not xg_data:
+        xg_data = [p for p in predictions
+                    if p.get("home_xg", 0) > 0
+                    and p.get("actual_home_goals") is not None
+                    and p.get("actual_away_goals") is not None]
+        for p in xg_data:
+            if p.get("actual_total_goals") is None:
+                p["actual_total_goals"] = (p["actual_home_goals"] or 0) + (p["actual_away_goals"] or 0)
+
+    if xg_data:
+        avg_predicted_xg = sum((p["home_xg"] + p["away_xg"]) for p in xg_data) / len(xg_data)
+        avg_actual_goals = sum(p["actual_total_goals"] for p in xg_data) / len(xg_data)
+        result["xg"] = {
+            "total": len(xg_data),
+            "avg_predicted": avg_predicted_xg,
+            "avg_actual": avg_actual_goals,
+            "bias": avg_predicted_xg - avg_actual_goals,
+        }
+
+    return result
 
 
 async def get_pending_predictions(limit: int = 20) -> list:

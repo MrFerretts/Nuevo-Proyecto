@@ -572,18 +572,23 @@ def _adjust_for_rest(home: TeamAnalysis, away: TeamAnalysis,
 
 def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
                            league_id: int = 0, standings: list = None,
-                           market_odds: dict = None) -> dict:
+                           market_odds: dict = None,
+                           calibration: dict = None) -> dict:
     """Estima probabilidades combinando Poisson con ajustes contextuales.
 
     NUEVO v2: Si hay odds del mercado, las usa como ancla (el mercado es ~96%
     eficiente en ligas top). El modelo solo AJUSTA sobre el mercado, no intenta
     superarlo desde cero. Esto es cómo trabajan los profesionales.
 
+    NUEVO v3: Si hay datos de calibración histórica, aplica correcciones de sesgo.
+    Si el modelo sobreestima Over 2.5 por un 8%, reduce esa probabilidad en 8%.
+
     1. Calcula xG con fuerza de ataque/defensa (+ xG real si disponible)
     2. Genera probabilidades base con Poisson
     3. Si hay odds del mercado → blend 55% mercado + 45% modelo
     4. Ajusta con forma, posición, H2H, lesiones, descanso
-    5. Normaliza y devuelve
+    5. Aplica correcciones de calibración históricas
+    6. Normaliza y devuelve
     """
     # Paso 1: Promedios de liga
     avg_home, avg_away = DEFAULT_LEAGUE_AVG
@@ -679,14 +684,59 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
     p_draw /= total
     p_away /= total
 
+    # Paso 5: Calibración — ajustar según historial de aciertos/errores
+    p_over25 = poisson["over25"]
+    p_btts = poisson["btts_yes"]
+    calibration_applied = []
+
+    if calibration and calibration.get("sample_size", 0) >= 10:
+        # Over 2.5: corregir sesgo
+        over25_cal = calibration.get("over25")
+        if over25_cal and over25_cal.get("total", 0) >= 8:
+            bias = over25_cal["bias"]
+            if abs(bias) > 0.03:  # Solo corregir si el sesgo es significativo (>3%)
+                # Corrección gradual: 50% del sesgo (para no sobrecompensar)
+                correction = bias * 0.5
+                p_over25 = max(0.05, min(0.95, p_over25 - correction))
+                calibration_applied.append(f"Over2.5 bias={bias:+.1%} → corrección={-correction:+.1%}")
+                logger.info(f"Calibración Over2.5: bias={bias:+.3f}, corrección={-correction:+.3f}")
+
+        # BTTS: corregir sesgo
+        btts_cal = calibration.get("btts")
+        if btts_cal and btts_cal.get("total", 0) >= 8:
+            bias = btts_cal["bias"]
+            if abs(bias) > 0.03:
+                correction = bias * 0.5
+                p_btts = max(0.05, min(0.95, p_btts - correction))
+                calibration_applied.append(f"BTTS bias={bias:+.1%} → corrección={-correction:+.1%}")
+                logger.info(f"Calibración BTTS: bias={bias:+.3f}, corrección={-correction:+.3f}")
+
+        # xG: corregir sesgo en goles esperados
+        xg_cal = calibration.get("xg")
+        if xg_cal and xg_cal.get("total", 0) >= 8:
+            xg_bias = xg_cal["bias"]
+            if abs(xg_bias) > 0.2:  # Solo si sobreestima/subestima >0.2 goles
+                # Ajustar xG proporcionalmente
+                total_xg = home_xg + away_xg
+                if total_xg > 0:
+                    correction_factor = 1 - (xg_bias * 0.3 / total_xg)  # 30% del sesgo
+                    correction_factor = max(0.8, min(1.2, correction_factor))
+                    home_xg *= correction_factor
+                    away_xg *= correction_factor
+                    calibration_applied.append(f"xG bias={xg_bias:+.2f} goles → factor={correction_factor:.2f}")
+                    logger.info(f"Calibración xG: bias={xg_bias:+.2f}, factor={correction_factor:.3f}")
+
+    if calibration_applied:
+        logger.info(f"Calibraciones aplicadas: {'; '.join(calibration_applied)}")
+
     return {
         "home_win": p_home,
         "draw": p_draw,
         "away_win": p_away,
         "over15": poisson["over15"],
-        "over25": poisson["over25"],
+        "over25": p_over25,
         "over35": poisson["over35"],
-        "btts": poisson["btts_yes"],
+        "btts": p_btts,
         "home_or_draw": p_home + p_draw,
         "away_or_draw": p_away + p_draw,
         "home_or_away": p_home + p_away,
@@ -697,6 +747,7 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         "has_real_xg": home.real_xg > 0 and away.real_xg > 0,
         "has_fbref": home.sca_p90 > 0 and away.sca_p90 > 0,
         "has_market_anchor": bool(market_odds and market_odds.get("home", 0) > 1),
+        "calibration_applied": calibration_applied,
     }
 
 
@@ -1070,6 +1121,13 @@ def format_analysis_report(
         f"⚽ BTTS: *{probs.get('btts', 0):.1%}*",
         f"📊 xG estimado: *{probs.get('home_xg', 0):.2f}* - *{probs.get('away_xg', 0):.2f}* (Total: *{probs.get('expected_goals', 0):.2f}*)",
     ])
+
+    # Mostrar correcciones de calibración aplicadas
+    cal_applied = probs.get("calibration_applied", [])
+    if cal_applied:
+        lines.extend(["", "🧪 *CALIBRACIÓN APLICADA*"])
+        for cal_note in cal_applied:
+            lines.append(f"   📐 {cal_note}")
 
     # Resultados exactos más probables
     exact_scores = probs.get("exact_scores", [])

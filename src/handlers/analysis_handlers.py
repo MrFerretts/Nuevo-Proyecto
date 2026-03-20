@@ -848,10 +848,22 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     except Exception:
         pass
 
-    # Probabilidades (v2: con market anchor + xG real + rest days)
+    # Cargar calibración histórica (el modelo aprende de sus errores)
+    try:
+        from src.models.database import get_per_market_calibration
+        calibration = await get_per_market_calibration(league_id=league_id, days=60)
+        if calibration.get("sample_size", 0) >= 10:
+            logger.info(f"Calibración cargada: {calibration['sample_size']} predicciones, "
+                        f"Over2.5 bias={calibration.get('over25', {}).get('bias', 'N/A')}, "
+                        f"BTTS bias={calibration.get('btts', {}).get('bias', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Error cargando calibración: {e}")
+        calibration = None
+
+    # Probabilidades (v2: con market anchor + xG real + rest days + calibración)
     probs = estimate_probabilities(home_analysis, away_analysis, h2h,
                                    league_id=league_id, standings=standings,
-                                   market_odds=odds)
+                                   market_odds=odds, calibration=calibration)
 
     # Value bets (v2: con Kelly Criterion)
     suggestions = find_value_bets(probs, odds)
@@ -991,8 +1003,15 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     except Exception as e:
         logger.warning(f"FBref stats no disponible (fallback): {e}")
 
+    # Cargar calibración histórica
+    try:
+        from src.models.database import get_per_market_calibration
+        calibration = await get_per_market_calibration(league_id=league_id, days=60)
+    except Exception:
+        calibration = None
+
     probs = estimate_probabilities(home_analysis, away_analysis, h2h,
-                                   league_id=league_id)
+                                   league_id=league_id, calibration=calibration)
 
     odds = _extract_embedded_odds(fixture, home_name, away_name)
     if not any(v > 0 for v in odds.values()):

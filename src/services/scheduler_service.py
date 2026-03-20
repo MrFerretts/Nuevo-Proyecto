@@ -560,6 +560,18 @@ async def run_calibration_check(bot):
             if acc < 0.40 and n >= 5:
                 alerts.append(f"⚠️ Mercado '{market}' con {acc:.0%} accuracy — considerar desactivar")
 
+    # Per-market accuracy (learning system)
+    per_market = accuracy.get("per_market", {})
+    if per_market:
+        lines.extend(["", "🧠 *APRENDIZAJE POR MERCADO:*"])
+        for mkt, data in per_market.items():
+            n = data["total"]
+            c = data["correct"]
+            acc = c / n if n > 0 else 0
+            emoji = "✅" if acc >= 0.55 else ("🟡" if acc >= 0.45 else "❌")
+            label = {"1x2": "Resultado 1X2", "over25": "Over/Under 2.5", "btts": "BTTS"}.get(mkt, mkt)
+            lines.append(f"  {emoji} {label}: *{acc:.0%}* ({c}/{n} aciertos)")
+
     # Calibración
     calibration = accuracy.get("calibration", {})
     if calibration:
