@@ -31,6 +31,18 @@ def _get_current_season() -> int:
     return now.year - 1 if now.month <= 6 else now.year
 
 
+def _calc_rest_days(last_match_date: str) -> int:
+    """Calcula días de descanso desde el último partido."""
+    if not last_match_date:
+        return -1
+    try:
+        last = datetime.fromisoformat(last_match_date.replace("Z", "+00:00"))
+        now = datetime.now(last.tzinfo) if last.tzinfo else datetime.now()
+        return (now - last).days
+    except Exception:
+        return -1
+
+
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID:
@@ -755,6 +767,32 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     home_analysis = _build_team_analysis(home_name, home_stats, home_standing)
     away_analysis = _build_team_analysis(away_name, away_stats, away_standing)
 
+    # === NUEVAS MEJORAS v2 ===
+
+    # xG real de Understat
+    try:
+        from src.services.understat_service import get_team_xg
+        home_xg_data = await get_team_xg(home_name, league_id)
+        away_xg_data = await get_team_xg(away_name, league_id)
+        if home_xg_data:
+            home_analysis.real_xg = home_xg_data["xg"]
+            home_analysis.real_xga = home_xg_data["xga"]
+            logger.info(f"Understat xG: {home_name} → xG={home_xg_data['xg']:.2f}, xGA={home_xg_data['xga']:.2f}")
+        if away_xg_data:
+            away_analysis.real_xg = away_xg_data["xg"]
+            away_analysis.real_xga = away_xg_data["xga"]
+            logger.info(f"Understat xG: {away_name} → xG={away_xg_data['xg']:.2f}, xGA={away_xg_data['xga']:.2f}")
+    except Exception as e:
+        logger.warning(f"Understat xG no disponible: {e}")
+
+    # Días de descanso (desde último partido)
+    if home_matches:
+        home_analysis.last_match_date = home_matches[0].get("utcDate", "")
+        home_analysis.rest_days = _calc_rest_days(home_analysis.last_match_date)
+    if away_matches:
+        away_analysis.last_match_date = away_matches[0].get("utcDate", "")
+        away_analysis.rest_days = _calc_rest_days(away_analysis.last_match_date)
+
     # Lesiones (desde API-Football si disponible)
     home_injuries, away_injuries = await _fetch_injuries(home_id, away_id)
     if home_injuries:
@@ -764,14 +802,22 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
         away_analysis.injuries = away_injuries
         away_analysis.injuries_count = len(away_injuries)
 
-    # Probabilidades (ahora con Poisson + ajustes + promedios dinámicos)
-    probs = estimate_probabilities(home_analysis, away_analysis, h2h,
-                                   league_id=league_id, standings=standings)
-
-    # Cuotas del mercado (usando el sport_key correcto para la liga)
+    # Cuotas del mercado PRIMERO (para market anchor)
     odds = await _get_odds_for_match(league_id, fixture, home_name, away_name)
 
-    # Value bets
+    # Guardar snapshot de odds para tracking de line movement
+    try:
+        from src.models.database import save_odds_snapshot
+        await save_odds_snapshot(f"{home_name} vs {away_name}", league_id, odds)
+    except Exception:
+        pass
+
+    # Probabilidades (v2: con market anchor + xG real + rest days)
+    probs = estimate_probabilities(home_analysis, away_analysis, h2h,
+                                   league_id=league_id, standings=standings,
+                                   market_odds=odds)
+
+    # Value bets (v2: con Kelly Criterion)
     suggestions = find_value_bets(probs, odds)
 
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)

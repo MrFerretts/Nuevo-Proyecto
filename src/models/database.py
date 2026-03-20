@@ -106,7 +106,53 @@ async def init_db():
             )
         """)
 
+        # Tabla de historial de odds para tracking de line movement
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS odds_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_name TEXT NOT NULL,
+                league_id INTEGER DEFAULT 0,
+                home_odds REAL DEFAULT 0,
+                draw_odds REAL DEFAULT 0,
+                away_odds REAL DEFAULT 0,
+                over25_odds REAL DEFAULT 0,
+                under25_odds REAL DEFAULT 0,
+                btts_yes_odds REAL DEFAULT 0,
+                snapshot_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         await db.commit()
+
+
+async def save_odds_snapshot(match_name: str, league_id: int, odds: dict):
+    """Guarda una foto de las cuotas para tracking de line movement."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO odds_history
+               (match_name, league_id, home_odds, draw_odds, away_odds,
+                over25_odds, under25_odds, btts_yes_odds)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                match_name, league_id,
+                odds.get("home", 0), odds.get("draw", 0), odds.get("away", 0),
+                odds.get("over25", 0), odds.get("under25", 0), odds.get("btts_yes", 0),
+            ),
+        )
+        await db.commit()
+
+
+async def get_odds_history(match_name: str) -> list:
+    """Obtiene historial de odds de un partido para detectar line movement."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM odds_history
+               WHERE match_name = ?
+               ORDER BY snapshot_at ASC""",
+            (match_name,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
 
 
 async def add_user(user_id: int, username: str, first_name: str):

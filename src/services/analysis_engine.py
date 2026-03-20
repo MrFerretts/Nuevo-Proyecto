@@ -30,20 +30,25 @@ class TeamAnalysis:
     league_position: int = 0
     points: int = 0
     injuries_count: int = 0
-    # Nuevos campos de contexto
-    home_goals_scored_avg: float = 0.0   # Promedio goles a favor en casa
-    home_goals_conceded_avg: float = 0.0 # Promedio goles en contra en casa
-    away_goals_scored_avg: float = 0.0   # Promedio goles a favor fuera
-    away_goals_conceded_avg: float = 0.0 # Promedio goles en contra fuera
-    streak: str = ""                     # Racha actual (ej: "3W", "2L")
+    # Campos de contexto
+    home_goals_scored_avg: float = 0.0
+    home_goals_conceded_avg: float = 0.0
+    away_goals_scored_avg: float = 0.0
+    away_goals_conceded_avg: float = 0.0
+    streak: str = ""
     matches_played: int = 0
     wins: int = 0
     draws: int = 0
     losses: int = 0
-    avg_total_goals: float = 0.0         # Promedio de goles totales por partido
-    over15_pct: float = 0.0              # % partidos con +1.5 goles
-    over35_pct: float = 0.0              # % partidos con +3.5 goles
-    injuries: list = field(default_factory=list)  # Lista de lesionados
+    avg_total_goals: float = 0.0
+    over15_pct: float = 0.0
+    over35_pct: float = 0.0
+    injuries: list = field(default_factory=list)
+    # === NUEVOS CAMPOS v2 ===
+    real_xg: float = 0.0              # xG real de Understat (por partido)
+    real_xga: float = 0.0             # xGA real de Understat (por partido)
+    rest_days: int = -1               # Días desde último partido (-1 = desconocido)
+    last_match_date: str = ""         # Fecha del último partido
 
 
 @dataclass
@@ -409,57 +414,95 @@ def find_team_in_standings(standings: list, team_id: int) -> dict:
 def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
                               league_avg_home_goals: float = 1.45,
                               league_avg_away_goals: float = 1.15) -> tuple[float, float]:
-    """Calcula goles esperados (xG) para cada equipo usando fuerza de ataque/defensa.
+    """Calcula goles esperados (xG) para cada equipo.
 
-    Método: Compara la fuerza de ataque y defensa de cada equipo contra
-    el promedio de la liga para estimar goles esperados.
-
-    Args:
-        home: Análisis del equipo local
-        away: Análisis del equipo visitante
-        h2h: Estadísticas H2H
-        league_avg_home_goals: Promedio de goles de locales en la liga (default europeo)
-        league_avg_away_goals: Promedio de goles de visitantes en la liga
-
-    Returns: (home_xg, away_xg)
+    Usa xG real de Understat cuando está disponible (60% peso),
+    combinado con el modelo de fuerza ataque/defensa (40% peso).
+    Si no hay xG real, usa solo el modelo clásico.
     """
-    # Fuerza de ataque = goles marcados del equipo / promedio de la liga
-    # Fuerza de defensa = goles recibidos del equipo / promedio de la liga
+    # === Modelo clásico: fuerza de ataque/defensa ===
     home_attack = home.goals_scored_avg / league_avg_home_goals if league_avg_home_goals > 0 else 1.0
     home_defense = home.goals_conceded_avg / league_avg_away_goals if league_avg_away_goals > 0 else 1.0
     away_attack = away.goals_scored_avg / league_avg_away_goals if league_avg_away_goals > 0 else 1.0
     away_defense = away.goals_conceded_avg / league_avg_home_goals if league_avg_home_goals > 0 else 1.0
 
-    # xG = fuerza ataque del equipo × fuerza defensa del rival × promedio liga
-    home_xg = home_attack * away_defense * league_avg_home_goals
-    away_xg = away_attack * home_defense * league_avg_away_goals
+    classic_home_xg = home_attack * away_defense * league_avg_home_goals
+    classic_away_xg = away_attack * home_defense * league_avg_away_goals
 
-    # Ajuste por H2H si hay suficientes datos (>= 3 partidos)
+    # === xG real de Understat (si disponible) ===
+    has_real_xg = home.real_xg > 0 and away.real_xg > 0
+    if has_real_xg:
+        # xG real ajustado por calidad defensiva del rival
+        real_home_xg = home.real_xg * (away.real_xga / max(league_avg_home_goals, 0.5))
+        real_away_xg = away.real_xg * (home.real_xga / max(league_avg_away_goals, 0.5))
+
+        # Blend: 60% xG real, 40% modelo clásico
+        home_xg = 0.6 * real_home_xg + 0.4 * classic_home_xg
+        away_xg = 0.6 * real_away_xg + 0.4 * classic_away_xg
+        logger.info(f"xG blend: real({real_home_xg:.2f}-{real_away_xg:.2f}) + classic({classic_home_xg:.2f}-{classic_away_xg:.2f}) = {home_xg:.2f}-{away_xg:.2f}")
+    else:
+        home_xg = classic_home_xg
+        away_xg = classic_away_xg
+
+    # Ajuste por H2H (>= 3 partidos, peso reducido: 10%)
     h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
     if h2h_total >= 3 and h2h.get("avg_goals", 0) > 0:
         h2h_avg = h2h["avg_goals"]
         current_total = home_xg + away_xg
         if current_total > 0:
-            # Ajustar 15% hacia el promedio H2H
             h2h_factor = h2h_avg / current_total
-            adjustment = 0.15
+            adjustment = 0.10  # Reducido de 0.15 a 0.10
             home_xg *= (1 - adjustment) + (adjustment * h2h_factor)
             away_xg *= (1 - adjustment) + (adjustment * h2h_factor)
 
-    # Ajuste por rendimiento local/visitante específico
+    # Ajuste por rendimiento local/visitante
     if home.home_goals_scored_avg > 0 and home.matches_played >= 5:
         home_local_factor = home.home_goals_scored_avg / max(home.goals_scored_avg, 0.1)
-        home_xg *= (0.7 + 0.3 * home_local_factor)  # Mezclar con factor local
+        home_xg *= (0.7 + 0.3 * home_local_factor)
 
     if away.away_goals_scored_avg > 0 and away.matches_played >= 5:
         away_visit_factor = away.away_goals_scored_avg / max(away.goals_scored_avg, 0.1)
         away_xg *= (0.7 + 0.3 * away_visit_factor)
 
-    # Clamp a valores razonables
+    # === Ajuste por descanso (días entre partidos) ===
+    home_xg, away_xg = _adjust_for_rest(home, away, home_xg, away_xg)
+
+    # Clamp
     home_xg = max(0.3, min(4.5, home_xg))
     away_xg = max(0.2, min(4.0, away_xg))
 
     return home_xg, away_xg
+
+
+def _adjust_for_rest(home: TeamAnalysis, away: TeamAnalysis,
+                     home_xg: float, away_xg: float) -> tuple[float, float]:
+    """Ajusta xG por diferencia en días de descanso.
+
+    Investigación muestra que equipos con <3 días de descanso rinden ~5-8% menos,
+    mientras que >6 días no tiene beneficio adicional vs 4-5 días.
+    """
+    if home.rest_days < 0 or away.rest_days < 0:
+        return home_xg, away_xg
+
+    def rest_factor(days: int) -> float:
+        if days <= 2:
+            return 0.93  # -7% (partido cada 2 días, fatiga severa)
+        elif days == 3:
+            return 0.97  # -3% (turnaround rápido)
+        elif days <= 5:
+            return 1.00  # Normal
+        elif days <= 7:
+            return 1.01  # Leve beneficio
+        else:
+            return 1.00  # >7 días puede significar falta de ritmo
+
+    home_rest = rest_factor(home.rest_days)
+    away_rest = rest_factor(away.rest_days)
+
+    if home_rest != 1.0 or away_rest != 1.0:
+        logger.info(f"Rest adjustment: home={home.rest_days}d ({home_rest:.2f}x), away={away.rest_days}d ({away_rest:.2f}x)")
+
+    return home_xg * home_rest, away_xg * away_rest
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -467,15 +510,21 @@ def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
 # ══════════════════════════════════════════════════════════════════
 
 def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
-                           league_id: int = 0, standings: list = None) -> dict:
+                           league_id: int = 0, standings: list = None,
+                           market_odds: dict = None) -> dict:
     """Estima probabilidades combinando Poisson con ajustes contextuales.
 
-    1. Calcula xG con fuerza de ataque/defensa y promedios de liga reales
+    NUEVO v2: Si hay odds del mercado, las usa como ancla (el mercado es ~96%
+    eficiente en ligas top). El modelo solo AJUSTA sobre el mercado, no intenta
+    superarlo desde cero. Esto es cómo trabajan los profesionales.
+
+    1. Calcula xG con fuerza de ataque/defensa (+ xG real si disponible)
     2. Genera probabilidades base con Poisson
-    3. Ajusta con forma reciente, posición y H2H
-    4. Normaliza y devuelve probabilidades finales
+    3. Si hay odds del mercado → blend 55% mercado + 45% modelo
+    4. Ajusta con forma, posición, H2H, lesiones, descanso
+    5. Normaliza y devuelve
     """
-    # Paso 1: Obtener promedios de liga (dinámicos si hay standings, sino estáticos)
+    # Paso 1: Promedios de liga
     avg_home, avg_away = DEFAULT_LEAGUE_AVG
     if standings:
         dyn_home, dyn_away = calculate_league_averages_from_standings(standings)
@@ -484,46 +533,61 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
             logger.info(f"Usando promedios DINÁMICOS: home={avg_home:.2f}, away={avg_away:.2f}")
         else:
             avg_home, avg_away = get_league_averages(league_id)
-            logger.info(f"Usando promedios ESTÁTICOS para liga {league_id}: home={avg_home:.2f}, away={avg_away:.2f}")
     elif league_id:
         avg_home, avg_away = get_league_averages(league_id)
-        logger.info(f"Usando promedios ESTÁTICOS para liga {league_id}: home={avg_home:.2f}, away={avg_away:.2f}")
 
-    # Paso 2: Calcular goles esperados con promedios de liga correctos
+    # Paso 2: xG y Poisson
     home_xg, away_xg = calculate_expected_goals(home, away, h2h, avg_home, avg_away)
-
-    # Paso 2: Probabilidades Poisson (base)
     poisson = poisson_match_probs(home_xg, away_xg)
 
-    # Paso 3: Ajustes contextuales sobre las probabilidades 1X2
     p_home = poisson["home_win"]
     p_draw = poisson["draw"]
     p_away = poisson["away_win"]
 
-    # Ajuste por forma reciente (máximo ±5% shift)
-    form_diff = (home.form_score - away.form_score) / 100  # -1 a +1
-    form_shift = form_diff * 0.05
+    # Paso 3: MARKET ANCHOR - blend con odds del mercado si disponibles
+    # El mercado es más eficiente que cualquier modelo para ligas top.
+    # Nuestro valor está en los AJUSTES que el mercado no captura bien.
+    if market_odds and market_odds.get("home", 0) > 1 and market_odds.get("away", 0) > 1:
+        market_home = _remove_overround(market_odds, "home")
+        market_draw = _remove_overround(market_odds, "draw")
+        market_away = _remove_overround(market_odds, "away")
+
+        if market_home > 0 and market_away > 0:
+            # Blend: 55% mercado, 45% nuestro modelo
+            p_home = 0.55 * market_home + 0.45 * p_home
+            p_draw = 0.55 * market_draw + 0.45 * p_draw
+            p_away = 0.55 * market_away + 0.45 * p_away
+            logger.info(f"Market anchor: market({market_home:.1%}/{market_draw:.1%}/{market_away:.1%}) "
+                        f"+ model({poisson['home_win']:.1%}/{poisson['draw']:.1%}/{poisson['away_win']:.1%}) "
+                        f"= blend({p_home:.1%}/{p_draw:.1%}/{p_away:.1%})")
+
+    # Paso 4: Ajustes contextuales (reducidos porque el market anchor ya captura mucho)
+    adjustment_weight = 0.6 if market_odds else 1.0  # Ajustes menores si ya tenemos mercado
+
+    # Forma reciente (máx ±4%)
+    form_diff = (home.form_score - away.form_score) / 100
+    form_shift = form_diff * 0.04 * adjustment_weight
     p_home += form_shift
     p_away -= form_shift
 
-    # Ajuste por posición en liga (máximo ±3% shift)
+    # Posición en liga (máx ±2.5%)
     if home.league_position > 0 and away.league_position > 0:
         max_pos = max(home.league_position, away.league_position, 20)
         pos_diff = (away.league_position - home.league_position) / max_pos
-        pos_shift = pos_diff * 0.03
+        pos_shift = pos_diff * 0.025 * adjustment_weight
         p_home += pos_shift
         p_away -= pos_shift
 
-    # Ajuste por H2H (máximo ±4% shift)
+    # H2H (máx ±3%)
     h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
     if h2h_total >= 3:
         h2h_home_rate = h2h["home_wins"] / h2h_total
         h2h_away_rate = h2h["away_wins"] / h2h_total
-        h2h_shift = (h2h_home_rate - h2h_away_rate) * 0.04
+        h2h_shift = (h2h_home_rate - h2h_away_rate) * 0.03 * adjustment_weight
         p_home += h2h_shift
         p_away -= h2h_shift
 
-    # Ajuste por lesiones (cada lesión clave reduce ~1.5%)
+    # Lesiones (1.5% por lesionado, máx 8%)
     if home.injuries_count > 0:
         injury_penalty = min(home.injuries_count * 0.015, 0.08)
         p_home -= injury_penalty
@@ -535,10 +599,10 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         p_home += injury_penalty * 0.5
         p_draw += injury_penalty * 0.5
 
-    # Clamp y normalizar
-    p_home = max(0.05, p_home)
-    p_draw = max(0.05, p_draw)
-    p_away = max(0.05, p_away)
+    # Normalizar
+    p_home = max(0.03, p_home)
+    p_draw = max(0.03, p_draw)
+    p_away = max(0.03, p_away)
     total = p_home + p_draw + p_away
     p_home /= total
     p_draw /= total
@@ -559,7 +623,29 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         "expected_goals": home_xg + away_xg,
         "home_xg": home_xg,
         "away_xg": away_xg,
+        "has_real_xg": home.real_xg > 0 and away.real_xg > 0,
+        "has_market_anchor": bool(market_odds and market_odds.get("home", 0) > 1),
     }
+
+
+def _remove_overround(odds: dict, outcome: str) -> float:
+    """Convierte odds a probabilidad real eliminando el margen del bookmaker.
+
+    Usa el método proporcional: divide prob implícita entre la suma total.
+    """
+    home_odds = odds.get("home", 0)
+    draw_odds = odds.get("draw", 0)
+    away_odds = odds.get("away", 0)
+
+    if home_odds <= 1 or draw_odds <= 1 or away_odds <= 1:
+        return 0
+
+    total_implied = (1 / home_odds) + (1 / draw_odds) + (1 / away_odds)
+    if total_implied <= 0:
+        return 0
+
+    implied = 1 / odds.get(outcome, 1)
+    return implied / total_implied
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -600,31 +686,47 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
 
     for market, pick, est_prob, market_odds in markets:
         if market_odds <= 1.0 or est_prob <= 0:
-            continue  # Sin cuota válida
+            continue
 
         implied_prob = 1 / market_odds
         value = est_prob - implied_prob
 
-        if value > 0.03:  # Al menos 3% de edge
-            # Calcular confianza y stake
-            if value > 0.15:
+        # Edge mínimo: 5% (subido de 3% para reducir falsos positivos)
+        if value > 0.05:
+            # Kelly Criterion: fracción óptima del bankroll
+            # f* = (bp - q) / b donde b=odds-1, p=prob ganar, q=1-p
+            b = market_odds - 1
+            kelly_fraction = (b * est_prob - (1 - est_prob)) / b if b > 0 else 0
+            kelly_fraction = max(0, min(0.25, kelly_fraction))  # Cap al 25%
+
+            # Confianza y stake basados en Kelly + edge
+            if kelly_fraction > 0.10:
                 confidence = "muy_alta"
                 stake = 5
-            elif value > 0.10:
+            elif kelly_fraction > 0.06:
                 confidence = "alta"
                 stake = 4
-            elif value > 0.07:
+            elif kelly_fraction > 0.03:
                 confidence = "media"
                 stake = 3
             else:
                 confidence = "baja"
                 stake = 2
 
-            # Limitar stake si la cuota es muy alta (más riesgo)
+            # Reducir stake para cuotas altas (más varianza)
             if market_odds > 3.5:
                 stake = max(1, stake - 1)
 
-            reasoning = _build_reasoning(market, pick, est_prob, implied_prob, value, market_odds, probs)
+            # Reducir confianza si no tenemos market anchor o xG real
+            has_market = probs.get("has_market_anchor", False)
+            has_xg = probs.get("has_real_xg", False)
+            if not has_market and not has_xg:
+                stake = max(1, stake - 1)
+                if confidence == "muy_alta":
+                    confidence = "alta"
+
+            reasoning = _build_reasoning(market, pick, est_prob, implied_prob,
+                                         value, market_odds, probs, kelly_fraction)
 
             suggestions.append(BetSuggestion(
                 market=market,
@@ -644,24 +746,31 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
 
 
 def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: float,
-                     value: float, odds: float, probs: dict = None) -> list[str]:
+                     value: float, odds: float, probs: dict = None,
+                     kelly: float = 0) -> list[str]:
     """Construye las razones detrás de una sugerencia."""
     reasons = []
-    reasons.append(f"Probabilidad estimada: {est_prob:.1%} vs implícita: {implied_prob:.1%}")
-    reasons.append(f"Edge detectado: +{value:.1%}")
+    reasons.append(f"Prob estimada: {est_prob:.1%} vs mercado: {implied_prob:.1%}")
+    reasons.append(f"Edge: +{value:.1%} | Kelly: {kelly:.1%} del bankroll")
 
-    if value > 0.15:
-        reasons.append("Valor MUY ALTO - posible ineficiencia del mercado")
-    elif value > 0.10:
-        reasons.append("Valor ALTO - buena oportunidad")
+    # Calidad de datos
+    if probs:
+        data_quality = []
+        if probs.get("has_real_xg"):
+            data_quality.append("xG real")
+        if probs.get("has_market_anchor"):
+            data_quality.append("anclado al mercado")
+        if data_quality:
+            reasons.append(f"Datos: {', '.join(data_quality)}")
+        else:
+            reasons.append("⚠️ Sin xG real ni odds del mercado - fiabilidad reducida")
 
-    # Razonamiento basado en xG
     if probs and "home_xg" in probs:
         total_xg = probs["home_xg"] + probs["away_xg"]
-        if "Over" in pick:
-            reasons.append(f"xG total esperado: {total_xg:.2f}")
+        if "Over" in pick or "Under" in pick:
+            reasons.append(f"xG total: {total_xg:.2f}")
         elif "BTTS" in pick or "Ambos" in pick:
-            reasons.append(f"xG local: {probs['home_xg']:.2f} | xG visitante: {probs['away_xg']:.2f}")
+            reasons.append(f"xG: {probs['home_xg']:.2f} vs {probs['away_xg']:.2f}")
 
     if odds >= 2.0 and odds <= 3.0:
         reasons.append("Cuota en rango óptimo (2.0-3.0)")
@@ -757,18 +866,47 @@ def format_analysis_report(
             injured_names = ", ".join(away.injuries[:5])
             lines.append(f"✈️ {away.name}: {injured_names}")
 
+    # Indicador de calidad de datos
+    data_flags = []
+    if probs.get("has_real_xg"):
+        data_flags.append("xG Real")
+    if probs.get("has_market_anchor"):
+        data_flags.append("Market Anchor")
+    data_quality = " + ".join(data_flags) if data_flags else "Solo modelo básico"
+
+    # xG real de Understat si disponible
+    if home.real_xg > 0 or away.real_xg > 0:
+        lines.extend([
+            "",
+            f"📊 *xG REAL (Understat)*",
+            f"🏠 {home.name}: xG {home.real_xg:.2f} | xGA {home.real_xga:.2f}",
+            f"✈️ {away.name}: xG {away.real_xg:.2f} | xGA {away.real_xga:.2f}",
+        ])
+
+    # Descanso
+    if home.rest_days >= 0 or away.rest_days >= 0:
+        rest_parts = []
+        if home.rest_days >= 0:
+            rest_emoji = "🔴" if home.rest_days <= 3 else "🟢"
+            rest_parts.append(f"{rest_emoji} {home.name}: {home.rest_days}d")
+        if away.rest_days >= 0:
+            rest_emoji = "🔴" if away.rest_days <= 3 else "🟢"
+            rest_parts.append(f"{rest_emoji} {away.name}: {away.rest_days}d")
+        lines.extend(["", f"⏱ *DESCANSO*", " | ".join(rest_parts)])
+
     lines.extend([
         "",
         f"{'═' * 28}",
         "",
-        f"🎯 *PROBABILIDADES ESTIMADAS (Poisson)*",
+        f"🎯 *PROBABILIDADES ESTIMADAS*",
+        f"📡 _{data_quality}_",
         f"🏠 Victoria Local: *{probs['home_win']:.1%}*",
         f"🤝 Empate: *{probs['draw']:.1%}*",
         f"✈️ Victoria Visitante: *{probs['away_win']:.1%}*",
         "",
         f"⚽ Over 1.5: {probs.get('over15', 0):.0%} | Over 2.5: {probs.get('over25', 0):.0%} | Over 3.5: {probs.get('over35', 0):.0%}",
         f"⚽ BTTS: *{probs.get('btts', 0):.1%}*",
-        f"📊 xG: *{probs.get('home_xg', 0):.2f}* - *{probs.get('away_xg', 0):.2f}* (Total: *{probs.get('expected_goals', 0):.2f}*)",
+        f"📊 xG estimado: *{probs.get('home_xg', 0):.2f}* - *{probs.get('away_xg', 0):.2f}* (Total: *{probs.get('expected_goals', 0):.2f}*)",
     ])
 
     # Resultados exactos más probables
