@@ -602,6 +602,17 @@ async def get_user_bets(user_id: int, limit: int = 20) -> list:
             return [dict(r) for r in await cursor.fetchall()]
 
 
+async def get_all_user_bets(user_id: int) -> list:
+    """Obtiene TODAS las apuestas del usuario (para exportar CSV)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_bets WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
 async def get_user_pending_bets(user_id: int) -> list:
     """Obtiene apuestas pendientes del usuario."""
     async with aiosqlite.connect(DB_PATH) as db:

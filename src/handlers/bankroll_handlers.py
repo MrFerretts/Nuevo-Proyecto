@@ -9,8 +9,11 @@ Comandos:
   /setbankroll       - Establecer bankroll inicial
 """
 
+import base64
+import csv
 import io
 import logging
+from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -21,6 +24,7 @@ from src.models.database import (
     resolve_user_bet, get_user_bets, get_user_pending_bets,
     get_user_bet_stats, get_user_bets_timeline, get_user_streak,
     get_user_stats_by_pick, get_user_weekly_stats,
+    get_all_user_bets,
 )
 from src.services.chart_service import (
     generate_pnl_chart, generate_weekly_chart, generate_pick_stats_chart,
@@ -887,3 +891,322 @@ async def my_bets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text += "_/bankroll para ver tu resumen completo_"
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════════════════════
+# LECTOR DE TICKETS POR FOTO (Groq Vision)
+# ══════════════════════════════════════════════════════════════
+
+async def ticket_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lee una foto de ticket de apuesta y registra las apuestas automáticamente."""
+    if not GROQ_API_KEY:
+        await update.message.reply_text("❌ Falta GROQ\\_API\\_KEY para leer tickets.", parse_mode="Markdown")
+        return
+
+    if not update.message.photo:
+        return
+
+    user_id = update.effective_user.id
+    br = await get_or_create_bankroll(user_id)
+
+    if br["current_bankroll"] <= 0:
+        await update.message.reply_text(
+            "💀 Tu bankroll está en $0. Usa `/setbankroll <monto>` para reiniciar.",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("📸 Leyendo tu ticket de apuesta...")
+
+    # Descargar la foto (mayor resolución)
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        photo_bytes = await file.download_as_bytearray()
+        image_b64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Error descargando foto: {e}")
+        await msg.edit_text("❌ No pude descargar la imagen. Intenta de nuevo.")
+        return
+
+    # Enviar a Groq Vision
+    ai = AIAnalysisService(GROQ_API_KEY)
+    parsed = await ai.parse_ticket_image(image_b64)
+
+    if not parsed or "error" in parsed:
+        error = parsed.get("error", "No pude leer el ticket") if parsed else "Error de conexión con IA Vision"
+        await msg.edit_text(
+            f"❌ {error}\n\n"
+            "Asegúrate de que la foto muestre claramente el ticket de apuesta.\n"
+            "También puedes registrar manualmente: `/apostar` o `/parlay`",
+            parse_mode="Markdown",
+        )
+        return
+
+    bets = parsed.get("bets", [])
+    if not bets:
+        await msg.edit_text("❌ No encontré apuestas en la imagen. Intenta con otra foto.")
+        return
+
+    ticket_type = parsed.get("type", "single")
+    stake = parsed.get("stake")
+
+    # Validar cuotas
+    for bet in bets:
+        try:
+            bet["odds"] = float(bet.get("odds", 0))
+            if bet["odds"] <= 1:
+                bet["odds"] = 0
+        except (ValueError, TypeError):
+            bet["odds"] = 0
+
+    if ticket_type == "parlay" or len(bets) > 1:
+        # ── PARLAY ──
+        valid_legs = [b for b in bets if b.get("pick") and b.get("odds", 0) > 1]
+        if len(valid_legs) < 2:
+            await msg.edit_text(
+                "❌ No pude leer suficientes patas del parlay.\n"
+                "Usa `/parlay` para registrarlo manualmente.",
+                parse_mode="Markdown",
+            )
+            return
+
+        combined_odds = 1.0
+        for leg in valid_legs:
+            combined_odds *= leg["odds"]
+        combined_odds = round(combined_odds, 2)
+
+        # Usar total_odds del ticket si lo detectó
+        ticket_odds = parsed.get("total_odds")
+        if ticket_odds:
+            try:
+                ticket_odds = float(ticket_odds)
+                if ticket_odds > 1:
+                    combined_odds = round(ticket_odds, 2)
+            except (ValueError, TypeError):
+                pass
+
+        context.user_data["confirm_parlay"] = {
+            "legs": valid_legs,
+            "combined_odds": combined_odds,
+            "stake": stake,
+        }
+
+        legs_text = ""
+        for i, leg in enumerate(valid_legs, 1):
+            legs_text += f"  {i}. {leg.get('match', '?')} → {leg['pick']} @ {leg['odds']:.2f}\n"
+
+        stake_text = ""
+        if stake:
+            try:
+                stake = float(stake)
+                potential = stake * (combined_odds - 1)
+                stake_text = f"\n💰 Stake: ${stake:.2f}\n🎁 Ganancia potencial: +${potential:.2f}"
+            except (ValueError, TypeError):
+                stake = None
+
+        keyboard = []
+        if stake and stake > 0:
+            keyboard.append([
+                InlineKeyboardButton("✅ Confirmar", callback_data="confirmparlay_yes"),
+                InlineKeyboardButton("❌ Cancelar", callback_data="confirmparlay_no"),
+            ])
+        else:
+            stakes = [
+                round(br["current_bankroll"] * p, 2)
+                for p in [0.01, 0.02, 0.03, 0.05]
+            ]
+            keyboard = [
+                [
+                    InlineKeyboardButton(f"1% (${stakes[0]:.0f})", callback_data=f"parlaystake_{stakes[0]}"),
+                    InlineKeyboardButton(f"2% (${stakes[1]:.0f})", callback_data=f"parlaystake_{stakes[1]}"),
+                ],
+                [
+                    InlineKeyboardButton(f"3% (${stakes[2]:.0f})", callback_data=f"parlaystake_{stakes[2]}"),
+                    InlineKeyboardButton(f"5% (${stakes[3]:.0f})", callback_data=f"parlaystake_{stakes[3]}"),
+                ],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="confirmparlay_no")],
+            ]
+
+        await msg.edit_text(
+            f"📸 *TICKET DETECTADO — PARLAY ({len(valid_legs)} picks)*\n"
+            f"{'─' * 28}\n"
+            f"{legs_text}"
+            f"{'─' * 28}\n"
+            f"💹 Cuota combinada: *{combined_odds:.2f}*"
+            f"{stake_text}\n"
+            f"💼 Bankroll: ${br['current_bankroll']:.2f}\n\n"
+            f"_Leído automáticamente de tu foto_",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+    else:
+        # ── APUESTA SIMPLE ──
+        bet = bets[0]
+        match_name = bet.get("match", "")
+        pick = bet.get("pick", "")
+        odds = bet.get("odds", 0)
+
+        if not pick:
+            await msg.edit_text("❌ No pude identificar la apuesta. Intenta con `/apostar`.", parse_mode="Markdown")
+            return
+
+        if not odds or odds <= 1:
+            await msg.edit_text(
+                f"📸 Detecté: *{pick}*" + (f" en _{match_name}_" if match_name else "") + "\n"
+                f"❌ Pero no pude leer la cuota. Usa:\n"
+                f"`/apostar {pick}" + (f" {match_name}" if match_name else "") + " cuota X.XX monto $XX`",
+                parse_mode="Markdown",
+            )
+            return
+
+        if not stake:
+            # Pedir stake
+            context.user_data["confirm_bet"] = {
+                "match": match_name or "?",
+                "pick": pick,
+                "odds": odds,
+                "stake": None,
+                "from_ticket": True,
+            }
+            await msg.edit_text(
+                f"📸 *TICKET DETECTADO*\n"
+                f"{'─' * 28}\n"
+                f"⚽ {match_name or '?'}\n"
+                f"🎯 {pick}\n"
+                f"💹 Cuota: {odds:.2f}\n"
+                f"{'─' * 28}\n"
+                f"❓ *¿Cuánto apostaste?*\n"
+                f"Responde con el monto (ej: `50`)",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            stake = float(stake)
+        except (ValueError, TypeError):
+            stake = None
+
+        if not stake or stake <= 0:
+            await msg.edit_text("❌ No pude leer el monto. Intenta con `/apostar`.", parse_mode="Markdown")
+            return
+
+        if stake > br["current_bankroll"]:
+            await msg.edit_text(f"❌ Stake ${stake:.2f} excede tu bankroll (${br['current_bankroll']:.2f})")
+            return
+
+        context.user_data["confirm_bet"] = {
+            "match": match_name or "?",
+            "pick": pick,
+            "odds": odds,
+            "stake": stake,
+        }
+
+        potential = stake * (odds - 1)
+        keyboard = [[
+            InlineKeyboardButton("✅ Confirmar", callback_data="confirmbet_yes"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="confirmbet_no"),
+        ]]
+
+        await msg.edit_text(
+            f"📸 *TICKET DETECTADO*\n"
+            f"{'─' * 28}\n"
+            f"⚽ {match_name or '?'}\n"
+            f"🎯 {pick}\n"
+            f"💹 Cuota: {odds:.2f}\n"
+            f"💰 Stake: ${stake:.2f}\n"
+            f"🎁 Ganancia potencial: +${potential:.2f}\n"
+            f"{'─' * 28}\n"
+            f"💼 Bankroll: ${br['current_bankroll']:.2f}\n\n"
+            f"_Leído automáticamente de tu foto_",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+# EXPORTAR APUESTAS A CSV
+# ══════════════════════════════════════════════════════════════
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Exporta todas las apuestas del usuario como archivo CSV."""
+    user_id = update.effective_user.id
+    bets = await get_all_user_bets(user_id)
+
+    if not bets:
+        await update.message.reply_text(
+            "📭 No tienes apuestas registradas.\n"
+            "Usa /apostar para registrar tu primera apuesta.",
+        )
+        return
+
+    # Generar CSV en memoria
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow([
+        "ID", "Fecha", "Partido", "Liga", "Pick", "Cuota",
+        "Stake", "Resultado", "Profit", "Resuelto",
+    ])
+
+    # Datos
+    total_staked = 0
+    total_profit = 0
+    wins = 0
+    losses = 0
+
+    for bet in bets:
+        writer.writerow([
+            bet["id"],
+            bet["created_at"],
+            bet["match_name"],
+            bet["league"],
+            bet["pick"],
+            f"{bet['odds']:.2f}",
+            f"{bet['stake']:.2f}",
+            bet["result"],
+            f"{bet['profit']:.2f}" if bet["profit"] else "0.00",
+            bet["resolved_at"] or "",
+        ])
+        if bet["result"] != "pending":
+            total_staked += bet["stake"]
+            total_profit += bet["profit"] or 0
+            if bet["result"] == "win":
+                wins += 1
+            elif bet["result"] == "loss":
+                losses += 1
+
+    # Fila resumen
+    writer.writerow([])
+    writer.writerow(["RESUMEN"])
+    writer.writerow(["Total apuestas", len(bets)])
+    writer.writerow(["Ganadas", wins])
+    writer.writerow(["Perdidas", losses])
+    writer.writerow(["Winrate", f"{wins / (wins + losses) * 100:.1f}%" if (wins + losses) > 0 else "N/A"])
+    writer.writerow(["Total apostado", f"${total_staked:.2f}"])
+    writer.writerow(["Profit total", f"${total_profit:.2f}"])
+    writer.writerow(["Yield", f"{total_profit / total_staked * 100:.1f}%" if total_staked > 0 else "N/A"])
+
+    # Enviar como archivo
+    csv_bytes = output.getvalue().encode("utf-8")
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"mis_apuestas_{today}.csv"
+
+    br = await get_or_create_bankroll(user_id)
+    stats = await get_user_bet_stats(user_id)
+
+    await update.message.reply_document(
+        document=io.BytesIO(csv_bytes),
+        filename=filename,
+        caption=(
+            f"📊 *EXPORTACIÓN DE APUESTAS*\n"
+            f"{'─' * 28}\n"
+            f"📋 {len(bets)} apuestas | ✅ {wins}W ❌ {losses}L\n"
+            f"💰 Profit: ${total_profit:.2f}\n"
+            f"💼 Bankroll: ${br['current_bankroll']:.2f}\n\n"
+            f"_Archivo CSV — ábrelo en Excel o Google Sheets_"
+        ),
+        parse_mode="Markdown",
+    )

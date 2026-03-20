@@ -31,6 +31,8 @@ _CACHE_TTL = 900  # 15 minutos
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"
+GROQ_VISION_MODEL = "llama-3.2-90b-vision-preview"
+GROQ_VISION_FALLBACK = "llama-3.2-11b-vision-preview"
 
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -821,6 +823,93 @@ Si falta el stake pon null. Si no entiendes: {{"error": "No entendí la combinad
         if not result:
             return None
         return self._clean_json(result)
+
+    async def parse_ticket_image(self, image_base64: str) -> dict | None:
+        """Parsea una foto de ticket de apuesta usando Groq Vision.
+
+        Extrae: apuestas individuales o parlay con match, pick, odds, stake.
+        Returns: {"type": "single"|"parlay", "bets": [...], "stake": float, "total_odds": float}
+        """
+        if not self.api_key:
+            return None
+
+        prompt = """Eres un lector de tickets de apuestas deportivas. Analiza esta imagen de un ticket/boleto de apuesta.
+
+EXTRAE TODA la información que puedas ver:
+- Cada apuesta/selección (partido, tipo de apuesta, cuota)
+- El monto apostado (stake)
+- Si es una apuesta simple o combinada/parlay
+
+Responde ÚNICAMENTE con JSON válido (sin markdown, sin ```):
+
+Para apuesta simple:
+{"type": "single", "bets": [{"match": "Equipo A vs Equipo B", "pick": "Over 2.5", "odds": 2.10}], "stake": 50.0}
+
+Para parlay/combinada:
+{"type": "parlay", "bets": [{"match": "Equipo A vs Equipo B", "pick": "Victoria Local", "odds": 1.85}, {"match": "Equipo C vs Equipo D", "pick": "Over 2.5", "odds": 2.10}], "stake": 30.0, "total_odds": 3.89}
+
+REGLAS:
+- Los odds/cuotas siempre en formato decimal (ej: 1.85, 2.10, 3.50)
+- Si ves cuotas americanas (+150, -110), conviértelas a decimal
+- Si ves cuotas fraccionarias (3/1, 5/2), conviértelas a decimal
+- Si no puedes leer el stake, pon null
+- Si no puedes leer algo, pon lo que sí puedas y marca lo ilegible como "?"
+- Si la imagen NO es un ticket de apuesta, responde: {"error": "No es un ticket de apuesta"}"""
+
+        for model in [GROQ_VISION_MODEL, GROQ_VISION_FALLBACK]:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{image_base64}",
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                        "max_tokens": 500,
+                        "temperature": 0.1,
+                    }
+
+                    logger.info(f"Vision: llamando {model}...")
+                    async with session.post(
+                        GROQ_API_URL, headers=headers, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=45),
+                    ) as resp:
+                        if resp.status == 429:
+                            logger.warning(f"Vision: rate limit con {model}, intentando fallback...")
+                            continue
+                        if resp.status != 200:
+                            body = await resp.text()
+                            logger.error(f"Vision API error {resp.status} con {model}: {body[:300]}")
+                            continue
+
+                        data = json.loads(await resp.text())
+                        choices = data.get("choices", [])
+                        if choices:
+                            text = choices[0].get("message", {}).get("content")
+                            if text:
+                                logger.info(f"Vision: respuesta OK de {model} ({len(text)} chars)")
+                                return self._clean_json(text)
+
+            except Exception as e:
+                logger.error(f"Vision: error con {model}: {e}")
+                continue
+
+        logger.error("Vision: todos los modelos fallaron")
+        return None
 
     async def parse_match_query(self, user_message: str, available_matches: list[dict]) -> dict | None:
         """Identifica qué partido quiere analizar el usuario.

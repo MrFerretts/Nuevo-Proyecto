@@ -39,6 +39,7 @@ from src.handlers.bankroll_handlers import (
     rendimiento_command,
     parlay_command, parlay_stake_callback, confirm_parlay_callback,
     confirm_result_callback,
+    ticket_photo_handler, export_command,
 )
 from src.services.scheduler_service import (
     check_expired_vips, auto_resolve_predictions, auto_resolve_user_bets,
@@ -111,6 +112,7 @@ def main():
     app.add_handler(CommandHandler("rendimiento", rendimiento_command))
     app.add_handler(CommandHandler("parlay", parlay_command))
     app.add_handler(CommandHandler("combinada", parlay_command))
+    app.add_handler(CommandHandler("exportar", export_command))
     app.add_handler(CallbackQueryHandler(confirm_bet_callback, pattern=r"^confirmbet_"))
 
     # Conversation handler para análisis
@@ -143,6 +145,9 @@ def main():
     app.add_handler(CallbackQueryHandler(parlay_stake_callback, pattern=r"^parlaystake_"))
     app.add_handler(CallbackQueryHandler(confirm_parlay_callback, pattern=r"^confirmparlay_"))
     app.add_handler(CallbackQueryHandler(confirm_result_callback, pattern=r"^confirmresult_"))
+
+    # Lector de tickets por foto (Groq Vision)
+    app.add_handler(MessageHandler(filters.PHOTO, ticket_photo_handler))
 
     # Router conversacional IA (catch-all para texto sin /comando)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router_handler))
