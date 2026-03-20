@@ -688,6 +688,23 @@ def _build_team_analysis(name: str, stats: dict, standing: dict) -> TeamAnalysis
     )
 
 
+def _apply_fbref_stats(analysis, fbref_stats):
+    """Aplica stats de FBref a un TeamAnalysis."""
+    analysis.possession_pct = fbref_stats.possession_pct
+    analysis.progressive_passes_p90 = fbref_stats.progressive_passes_per90
+    analysis.progressive_carries_p90 = fbref_stats.progressive_carries_per90
+    analysis.sca_p90 = fbref_stats.sca_per90
+    analysis.gca_p90 = fbref_stats.gca_per90
+    analysis.pressures_p90 = fbref_stats.pressures_per90
+    analysis.pressure_success_pct = fbref_stats.pressure_success_pct
+    analysis.tackles_won_p90 = fbref_stats.tackles_won_per90
+    analysis.interceptions_p90 = fbref_stats.interceptions_per90
+    analysis.shots_p90 = fbref_stats.shots_per90
+    analysis.shots_on_target_pct = fbref_stats.shots_on_target_pct
+    analysis.fbref_xg = fbref_stats.xg_per90
+    analysis.fbref_xga = fbref_stats.xga_per90
+
+
 async def _fetch_injuries(home_id: int, away_id: int) -> tuple[list, list]:
     """Intenta obtener lesiones desde API-Football si está disponible."""
     if not FOOTBALL_API_KEY:
@@ -790,6 +807,20 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     except Exception as e:
         logger.warning(f"Understat xG no disponible: {e}")
 
+    # === FBref advanced stats (StatsBomb) v3 ===
+    try:
+        from src.services.fbref_service import get_team_fbref_stats
+        home_fbref = await get_team_fbref_stats(home_name, league_id)
+        away_fbref = await get_team_fbref_stats(away_name, league_id)
+        if home_fbref:
+            _apply_fbref_stats(home_analysis, home_fbref)
+            logger.info(f"FBref: {home_name} → SCA={home_fbref.sca_per90:.1f}, PrgP={home_fbref.progressive_passes_per90:.1f}")
+        if away_fbref:
+            _apply_fbref_stats(away_analysis, away_fbref)
+            logger.info(f"FBref: {away_name} → SCA={away_fbref.sca_per90:.1f}, PrgP={away_fbref.progressive_passes_per90:.1f}")
+    except Exception as e:
+        logger.warning(f"FBref stats no disponible: {e}")
+
     # Días de descanso (desde último partido)
     if home_matches:
         home_analysis.last_match_date = home_matches[0].get("utcDate", "")
@@ -832,60 +863,8 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     except Exception:
         odds_hist = None
 
-    # === CEREBRO IA: Analiza contexto y ajusta probabilidades ===
-    ai = get_ai_service()
-    brain_data = None
-    ai_text = None
-    logger.info(f"AI service disponible: {ai is not None}, GROQ_API_KEY: {bool(GROQ_API_KEY)}")
-
-    if ai:
-        # Configurar Anthropic si disponible
-        from src.config import ANTHROPIC_API_KEY
-        if ANTHROPIC_API_KEY:
-            ai.anthropic_key = ANTHROPIC_API_KEY
-
-        league_name = LEAGUE_NAMES.get(league_id, "")
-        ai_result = await ai.generate_ai_analysis(
-            home_analysis, away_analysis, h2h, probs, suggestions,
-            league_name, odds=odds, line_movement=odds_hist,
-        )
-
-        if isinstance(ai_result, tuple):
-            ai_text, brain_data = ai_result
-        elif isinstance(ai_result, str):
-            ai_text = ai_result
-
-        # Si el cerebro IA produjo ajustes, aplicarlos a las probabilidades
-        if brain_data and brain_data.get("prob_adjustments"):
-            adj = brain_data["prob_adjustments"]
-            logger.info(f"Brain adjustments: home={adj.get('home_win', 0):+.3f}, "
-                        f"draw={adj.get('draw', 0):+.3f}, away={adj.get('away_win', 0):+.3f}")
-
-            probs["home_win"] += adj.get("home_win", 0)
-            probs["draw"] += adj.get("draw", 0)
-            probs["away_win"] += adj.get("away_win", 0)
-
-            # Re-normalizar
-            total = probs["home_win"] + probs["draw"] + probs["away_win"]
-            probs["home_win"] /= total
-            probs["draw"] /= total
-            probs["away_win"] /= total
-            probs["home_or_draw"] = probs["home_win"] + probs["draw"]
-            probs["away_or_draw"] = probs["away_win"] + probs["draw"]
-            probs["home_or_away"] = probs["home_win"] + probs["away_win"]
-
-            # Re-calcular value bets con probabilidades ajustadas por IA
-            suggestions = find_value_bets(probs, odds)
-            logger.info(f"Value bets recalculados con ajustes IA: {len(suggestions)} encontrados")
-    else:
-        logger.info("Saltando análisis IA (no hay GROQ_API_KEY o servicio no inicializado)")
-
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
                                     odds_history=odds_hist)
-
-    # Agregar análisis IA al reporte
-    if ai_text:
-        report += f"\n\n{'═' * 28}\n\n{ai_text}"
 
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
@@ -985,6 +964,18 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
             points=away_standing["points"],
         )
 
+    # FBref advanced stats (funciona para las 5 grandes ligas, no importa si es fd o api-football)
+    try:
+        from src.services.fbref_service import get_team_fbref_stats
+        home_fbref = await get_team_fbref_stats(home_name, league_id)
+        away_fbref = await get_team_fbref_stats(away_name, league_id)
+        if home_fbref:
+            _apply_fbref_stats(home_analysis, home_fbref)
+        if away_fbref:
+            _apply_fbref_stats(away_analysis, away_fbref)
+    except Exception as e:
+        logger.warning(f"FBref stats no disponible (fallback): {e}")
+
     probs = estimate_probabilities(home_analysis, away_analysis, h2h,
                                    league_id=league_id)
 
@@ -1000,23 +991,7 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     match_date = fixture.get("fixture", {}).get("date", "")
     await _save_analysis_prediction(home_name, away_name, league_id, match_date, probs, suggestions)
 
-    # Análisis con IA (si está configurado)
-    ai = get_ai_service()
-    logger.info(f"[fullback] AI service disponible: {ai is not None}")
-    if ai:
-        league_name = LEAGUE_NAMES.get(league_id, "")
-        ai_result = await ai.generate_ai_analysis(
-            home_analysis, away_analysis, h2h, probs, suggestions, league_name
-        )
-        ai_text = None
-        if isinstance(ai_result, tuple):
-            ai_text, _ = ai_result
-        elif isinstance(ai_result, str):
-            ai_text = ai_result
-        if ai_text:
-            report += f"\n\n{'═' * 28}\n\n{ai_text}"
-        else:
-            logger.warning("[fullback] AI analysis retornó None")
+    # Análisis IA deshabilitado — no aporta valor con Groq/Llama
 
     # Metadata para botones de apuesta rápida
     match_name = f"{home_name} vs {away_name}"
@@ -1272,13 +1247,6 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
         "📌 Usa /analizar para ver el análisis completo de un partido específico.",
         "📌 Usa /newtip para publicar una de estas oportunidades como tip.",
     ])
-
-    # Resumen IA de oportunidades
-    ai = get_ai_service()
-    if ai and all_suggestions:
-        ai_summary = await ai.generate_ai_tips_summary(all_suggestions[:8])
-        if ai_summary:
-            lines.extend(["", f"{'═' * 28}", "", ai_summary])
 
     text = "\n".join(lines)
     if len(text) > 4096:

@@ -50,6 +50,20 @@ class TeamAnalysis:
     real_xga: float = 0.0             # xGA real de Understat (por partido)
     rest_days: int = -1               # Días desde último partido (-1 = desconocido)
     last_match_date: str = ""         # Fecha del último partido
+    # === CAMPOS FBref (StatsBomb) v3 ===
+    possession_pct: float = 0.0       # Posesión real
+    progressive_passes_p90: float = 0.0   # Pases progresivos por 90
+    progressive_carries_p90: float = 0.0  # Carries progresivos por 90
+    sca_p90: float = 0.0             # Shot-Creating Actions por 90
+    gca_p90: float = 0.0             # Goal-Creating Actions por 90
+    pressures_p90: float = 0.0       # Presiones por 90
+    pressure_success_pct: float = 0.0 # % éxito en presiones
+    tackles_won_p90: float = 0.0     # Tackles ganados por 90
+    interceptions_p90: float = 0.0   # Intercepciones por 90
+    shots_p90: float = 0.0           # Tiros por 90
+    shots_on_target_pct: float = 0.0 # % tiros a puerta
+    fbref_xg: float = 0.0            # xG de StatsBomb (cross-ref con Understat)
+    fbref_xga: float = 0.0           # xGA de StatsBomb
 
 
 @dataclass
@@ -430,17 +444,31 @@ def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
     classic_home_xg = home_attack * away_defense * league_avg_home_goals
     classic_away_xg = away_attack * home_defense * league_avg_away_goals
 
-    # === xG real de Understat (si disponible) ===
-    has_real_xg = home.real_xg > 0 and away.real_xg > 0
-    if has_real_xg:
-        # xG real ajustado por calidad defensiva del rival
-        real_home_xg = home.real_xg * (away.real_xga / max(league_avg_home_goals, 0.5))
-        real_away_xg = away.real_xg * (home.real_xga / max(league_avg_away_goals, 0.5))
+    # === xG real de Understat y/o FBref (si disponibles) ===
+    has_understat_xg = home.real_xg > 0 and away.real_xg > 0
+    has_fbref_xg = home.fbref_xg > 0 and away.fbref_xg > 0
+
+    if has_understat_xg or has_fbref_xg:
+        # Promedio de xG disponibles (Understat + FBref = más robusto)
+        xg_sources_home = []
+        xg_sources_away = []
+
+        if has_understat_xg:
+            xg_sources_home.append(home.real_xg * (away.real_xga / max(league_avg_home_goals, 0.5)))
+            xg_sources_away.append(away.real_xg * (home.real_xga / max(league_avg_away_goals, 0.5)))
+
+        if has_fbref_xg:
+            xg_sources_home.append(home.fbref_xg * (away.fbref_xga / max(league_avg_home_goals, 0.5)))
+            xg_sources_away.append(away.fbref_xg * (home.fbref_xga / max(league_avg_away_goals, 0.5)))
+
+        real_home_xg = sum(xg_sources_home) / len(xg_sources_home)
+        real_away_xg = sum(xg_sources_away) / len(xg_sources_away)
 
         # Blend: 60% xG real, 40% modelo clásico
         home_xg = 0.6 * real_home_xg + 0.4 * classic_home_xg
         away_xg = 0.6 * real_away_xg + 0.4 * classic_away_xg
-        logger.info(f"xG blend: real({real_home_xg:.2f}-{real_away_xg:.2f}) + classic({classic_home_xg:.2f}-{classic_away_xg:.2f}) = {home_xg:.2f}-{away_xg:.2f}")
+        src = "Understat+FBref" if (has_understat_xg and has_fbref_xg) else ("Understat" if has_understat_xg else "FBref")
+        logger.info(f"xG blend ({src}): real({real_home_xg:.2f}-{real_away_xg:.2f}) + classic({classic_home_xg:.2f}-{classic_away_xg:.2f}) = {home_xg:.2f}-{away_xg:.2f}")
     else:
         home_xg = classic_home_xg
         away_xg = classic_away_xg
@@ -473,6 +501,38 @@ def calculate_expected_goals(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
     away_xg = max(0.2, min(4.0, away_xg))
 
     return home_xg, away_xg
+
+
+def _calc_tactical_score(team: TeamAnalysis) -> float:
+    """Calcula un score táctico compuesto usando datos de FBref.
+
+    Combina acciones creativas, pressing y acciones progresivas.
+    Retorna 0 si no hay datos de FBref.
+    """
+    if team.sca_p90 <= 0 and team.progressive_passes_p90 <= 0:
+        return 0.0
+
+    # Pesos: SCA y progressive actions son los mejores predictores
+    score = 0.0
+    weights = 0.0
+
+    if team.sca_p90 > 0:
+        score += team.sca_p90 * 3.0  # SCA ~25-35 per90 para equipos top
+        weights += 3.0
+    if team.gca_p90 > 0:
+        score += team.gca_p90 * 10.0  # GCA ~3-5 per90
+        weights += 10.0
+    if team.progressive_passes_p90 > 0:
+        score += team.progressive_passes_p90 * 1.0  # ~40-60 per90
+        weights += 1.0
+    if team.progressive_carries_p90 > 0:
+        score += team.progressive_carries_p90 * 1.5  # ~30-50 per90
+        weights += 1.5
+    if team.shots_p90 > 0:
+        score += team.shots_p90 * 2.0  # ~12-18 per90
+        weights += 2.0
+
+    return score / weights if weights > 0 else 0.0
 
 
 def _adjust_for_rest(home: TeamAnalysis, away: TeamAnalysis,
@@ -588,6 +648,16 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         p_home += h2h_shift
         p_away -= h2h_shift
 
+    # Tactical edge (FBref advanced stats, máx ±3%)
+    # Equipos con más SCA, progressive actions y pressing tienen ventaja táctica
+    home_tactical = _calc_tactical_score(home)
+    away_tactical = _calc_tactical_score(away)
+    if home_tactical > 0 and away_tactical > 0:
+        tactical_diff = (home_tactical - away_tactical) / max(home_tactical, away_tactical)
+        tactical_shift = tactical_diff * 0.03 * adjustment_weight
+        p_home += tactical_shift
+        p_away -= tactical_shift
+
     # Lesiones (1.5% por lesionado, máx 8%)
     if home.injuries_count > 0:
         injury_penalty = min(home.injuries_count * 0.015, 0.08)
@@ -625,6 +695,7 @@ def estimate_probabilities(home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
         "home_xg": home_xg,
         "away_xg": away_xg,
         "has_real_xg": home.real_xg > 0 and away.real_xg > 0,
+        "has_fbref": home.sca_p90 > 0 and away.sca_p90 > 0,
         "has_market_anchor": bool(market_odds and market_odds.get("home", 0) > 1),
     }
 
@@ -721,7 +792,8 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
             # Reducir confianza si no tenemos market anchor o xG real
             has_market = probs.get("has_market_anchor", False)
             has_xg = probs.get("has_real_xg", False)
-            if not has_market and not has_xg:
+            has_fbref = probs.get("has_fbref", False)
+            if not has_market and not has_xg and not has_fbref:
                 stake = max(1, stake - 1)
                 if confidence == "muy_alta":
                     confidence = "alta"
@@ -759,6 +831,8 @@ def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: floa
         data_quality = []
         if probs.get("has_real_xg"):
             data_quality.append("xG real")
+        if probs.get("has_fbref"):
+            data_quality.append("FBref/StatsBomb")
         if probs.get("has_market_anchor"):
             data_quality.append("anclado al mercado")
         if data_quality:
@@ -933,6 +1007,8 @@ def format_analysis_report(
     data_flags = []
     if probs.get("has_real_xg"):
         data_flags.append("xG Real")
+    if probs.get("has_fbref"):
+        data_flags.append("FBref/StatsBomb")
     if probs.get("has_market_anchor"):
         data_flags.append("Market Anchor")
     data_quality = " + ".join(data_flags) if data_flags else "Solo modelo básico"
@@ -945,6 +1021,29 @@ def format_analysis_report(
             f"🏠 {home.name}: xG {home.real_xg:.2f} | xGA {home.real_xga:.2f}",
             f"✈️ {away.name}: xG {away.real_xg:.2f} | xGA {away.real_xga:.2f}",
         ])
+
+    # FBref advanced stats
+    if home.sca_p90 > 0 or away.sca_p90 > 0:
+        lines.extend([
+            "",
+            f"🔬 *STATS AVANZADOS (FBref/StatsBomb)*",
+        ])
+        # Creatividad
+        if home.sca_p90 > 0:
+            lines.append(f"🏠 {home.name}: SCA {home.sca_p90:.1f}/90 | GCA {home.gca_p90:.1f}/90 | Tiros {home.shots_p90:.1f}/90 ({home.shots_on_target_pct:.0f}% a puerta)")
+        if away.sca_p90 > 0:
+            lines.append(f"✈️ {away.name}: SCA {away.sca_p90:.1f}/90 | GCA {away.gca_p90:.1f}/90 | Tiros {away.shots_p90:.1f}/90 ({away.shots_on_target_pct:.0f}% a puerta)")
+        # Progresión
+        if home.progressive_passes_p90 > 0 or away.progressive_passes_p90 > 0:
+            lines.append(f"📈 Prog pases: {home.name} {home.progressive_passes_p90:.1f}/90 | {away.name} {away.progressive_passes_p90:.1f}/90")
+            lines.append(f"📈 Prog carries: {home.name} {home.progressive_carries_p90:.1f}/90 | {away.name} {away.progressive_carries_p90:.1f}/90")
+        # Defensa
+        if home.tackles_won_p90 > 0 or away.tackles_won_p90 > 0:
+            lines.append(f"🛡 Tackles: {home.name} {home.tackles_won_p90:.1f}/90 | {away.name} {away.tackles_won_p90:.1f}/90")
+            lines.append(f"🛡 Intercep: {home.name} {home.interceptions_p90:.1f}/90 | {away.name} {away.interceptions_p90:.1f}/90")
+        # Posesión
+        if home.possession_pct > 0:
+            lines.append(f"⚽ Posesión: {home.name} {home.possession_pct:.0f}% | {away.name} {away.possession_pct:.0f}%")
 
     # Descanso
     if home.rest_days >= 0 or away.rest_days >= 0:

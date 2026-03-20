@@ -182,8 +182,25 @@ def main():
         id="calibration_check",
         name="Reporte de calibración diario",
     )
+    # Pre-cargar FBref stats de las 5 grandes ligas (2x/día a las 6:00 y 18:00)
+    async def _prefetch_fbref():
+        try:
+            from src.services.fbref_service import prefetch_league_stats, FBREF_LEAGUES
+            for league_id in FBREF_LEAGUES:
+                await prefetch_league_stats(league_id)
+        except Exception as e:
+            logger.warning(f"FBref prefetch error: {e}")
+
+    scheduler.add_job(
+        _prefetch_fbref,
+        "cron",
+        hour="6,18",
+        minute=0,
+        id="fbref_prefetch",
+        name="Pre-cargar FBref stats avanzados",
+    )
     scheduler.start()
-    logger.info("⏰ Scheduler: VIP (9:00) + Calibración (10:00) + Resolve (2h) + Odds snapshot (3h)")
+    logger.info("⏰ Scheduler: VIP (9:00) + Calibración (10:00) + Resolve (2h) + Odds (3h) + FBref (6:00,18:00)")
 
     # Log de diagnóstico de API keys
     logger.info("═══ DIAGNÓSTICO DE API KEYS ═══")

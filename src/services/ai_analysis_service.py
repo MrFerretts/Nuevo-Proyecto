@@ -176,6 +176,8 @@ class AIAnalysisService:
         data_sources = []
         if probs.get("has_real_xg"):
             data_sources.append("xG Real (Understat)")
+        if probs.get("has_fbref"):
+            data_sources.append("FBref/StatsBomb (táctico)")
         if probs.get("has_market_anchor"):
             data_sources.append("Market Anchor")
         data_quality = ", ".join(data_sources) if data_sources else "Solo modelo Poisson básico"
@@ -199,6 +201,7 @@ xG real: {f"{home.real_xg:.2f} xG, {home.real_xga:.2f} xGA" if home.real_xg > 0 
 Over 2.5: {home.over25_pct:.0f}% | BTTS: {home.btts_pct:.0f}% | Clean Sheet: {home.clean_sheets_pct:.0f}%
 Descanso: {f"{home.rest_days} días" if home.rest_days >= 0 else "Desconocido"}
 Lesiones: {len(home.injuries)} ({', '.join(home.injuries[:5]) if home.injuries else 'ninguna reportada'})
+{f"TÁCTICO (FBref): SCA {home.sca_p90:.1f}/90, GCA {home.gca_p90:.1f}/90, Tiros {home.shots_p90:.1f}/90 ({home.shots_on_target_pct:.0f}% on target), PrgP {home.progressive_passes_p90:.1f}/90, PrgC {home.progressive_carries_p90:.1f}/90, Posesión {home.possession_pct:.0f}%, Tackles {home.tackles_won_p90:.1f}/90, Int {home.interceptions_p90:.1f}/90" if home.sca_p90 > 0 else "TÁCTICO: No disponible (FBref)"}
 
 ── VISITANTE: {away.name} ──
 Forma: {away.form_detail} (score: {away.form_score:.0f}/100) | Racha: {away.streak}
@@ -209,6 +212,7 @@ xG real: {f"{away.real_xg:.2f} xG, {away.real_xga:.2f} xGA" if away.real_xg > 0 
 Over 2.5: {away.over25_pct:.0f}% | BTTS: {away.btts_pct:.0f}% | Clean Sheet: {away.clean_sheets_pct:.0f}%
 Descanso: {f"{away.rest_days} días" if away.rest_days >= 0 else "Desconocido"}
 Lesiones: {len(away.injuries)} ({', '.join(away.injuries[:5]) if away.injuries else 'ninguna reportada'})
+{f"TÁCTICO (FBref): SCA {away.sca_p90:.1f}/90, GCA {away.gca_p90:.1f}/90, Tiros {away.shots_p90:.1f}/90 ({away.shots_on_target_pct:.0f}% on target), PrgP {away.progressive_passes_p90:.1f}/90, PrgC {away.progressive_carries_p90:.1f}/90, Posesión {away.possession_pct:.0f}%, Tackles {away.tackles_won_p90:.1f}/90, Int {away.interceptions_p90:.1f}/90" if away.sca_p90 > 0 else "TÁCTICO: No disponible (FBref)"}
 
 ── H2H: {h2h_total} partidos ──
 {home.name}: {h2h.get("home_wins", 0)}W | Empates: {h2h.get("draws", 0)} | {away.name}: {h2h.get("away_wins", 0)}W
