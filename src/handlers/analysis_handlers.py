@@ -1311,6 +1311,15 @@ _LEAGUE_ALIASES = {
     "bundesliga": 78, "buli": 78, "alemania": 78, "germany": 78,
     "ligue 1": 61, "ligue1": 61, "francia": 61, "france": 61,
     "champions": 2, "champions league": 2, "ucl": 2, "cl": 2,
+    # Selecciones nacionales
+    "mundial": 2000, "world cup": 2000, "copa del mundo": 2000, "fifa": 2000,
+    "amistosos": 9000, "amistoso": 9000, "friendlies": 9000, "friendly": 9000, "internacional": 9000,
+    "conmebol": 9001, "eliminatorias conmebol": 9001, "clasificatorias conmebol": 9001, "sudamerica": 9001, "sudamericana": 9001,
+    "clasificatorias uefa": 9002, "eliminatorias europa": 9002, "clasif europa": 9002,
+    "concacaf": 9003, "eliminatorias concacaf": 9003, "clasificatorias concacaf": 9003,
+    "clasificatorias africa": 9004, "caf": 9004,
+    "clasificatorias asia": 9005, "afc": 9005,
+    "clasificatorias oceania": 9006, "ofc": 9006,
 }
 
 
@@ -1339,26 +1348,46 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for lid, lname in leagues_to_check:
         try:
-            if not can_use_fd(lid):
-                continue
-            fd = get_fd_service()
-            comp_code = COMPETITION_MAP[lid]
-            matches = await fd.get_upcoming_matches(comp_code, limit=10 if league_id else 5)
-            if not matches:
-                continue
+            if can_use_fd(lid):
+                # Liga con soporte en football-data.org
+                fd = get_fd_service()
+                comp_code = COMPETITION_MAP[lid]
+                matches = await fd.get_upcoming_matches(comp_code, limit=10 if league_id else 5)
+                if not matches:
+                    continue
 
-            lines.append(f"\n🏆 *{lname}*")
-            for m in matches:
-                home = m.get("homeTeam", {}).get("name", "?")
-                away = m.get("awayTeam", {}).get("name", "?")
-                utc_date = m.get("utcDate", "")
-                # Formatear fecha legible
-                try:
-                    dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
-                    date_str = dt.strftime("%a %d/%m %H:%M")
-                except Exception:
-                    date_str = utc_date[:16] if utc_date else "?"
-                lines.append(f"  ⚽ {home} vs {away} — {date_str}")
+                lines.append(f"\n🏆 *{lname}*")
+                for m in matches:
+                    home = m.get("homeTeam", {}).get("name", "?")
+                    away = m.get("awayTeam", {}).get("name", "?")
+                    utc_date = m.get("utcDate", "")
+                    try:
+                        dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
+                        date_str = dt.strftime("%a %d/%m %H:%M")
+                    except Exception:
+                        date_str = utc_date[:16] if utc_date else "?"
+                    lines.append(f"  ⚽ {home} vs {away} — {date_str}")
+            else:
+                # Fallback: usar Odds API (selecciones, ligas sin football-data.org)
+                sport_key = LEAGUE_TO_ODDS_SPORT.get(lid)
+                if not sport_key:
+                    continue
+                from src.services.odds_service import get_upcoming_games
+                games = await get_upcoming_games(sport_key, limit=10 if league_id else 5, markets="h2h")
+                if not games:
+                    continue
+
+                lines.append(f"\n🏆 *{lname}*")
+                for g in games:
+                    home = g.get("home_team", "?")
+                    away = g.get("away_team", "?")
+                    commence = g.get("commence_time", "")
+                    try:
+                        dt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                        date_str = dt.strftime("%a %d/%m %H:%M")
+                    except Exception:
+                        date_str = commence[:16] if commence else "?"
+                    lines.append(f"  ⚽ {home} vs {away} — {date_str}")
         except Exception as e:
             logger.warning(f"Error cargando partidos de {lname}: {e}")
             continue
@@ -1366,7 +1395,7 @@ async def matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not lines:
         await update.message.reply_text(
             "😕 No encontré partidos próximos. Intenta con una liga específica:\n"
-            "_\"partidos de la premier\"_, _\"partidos champions\"_",
+            "_\"partidos premier\"_, _\"partidos amistosos\"_, _\"partidos conmebol\"_",
             parse_mode="Markdown",
         )
         return

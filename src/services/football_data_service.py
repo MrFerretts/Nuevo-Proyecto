@@ -27,6 +27,17 @@ COMPETITION_MAP = {
     262: None,     # Liga MX - no disponible en free
     253: None,     # MLS - no disponible en free
     13: None,      # Copa Libertadores - no disponible en free
+    # Selecciones nacionales (disponibles en plan gratuito)
+    2000: "WC",    # Copa del Mundo
+    2018: "EC",    # Eurocopa
+    # Clasificatorias/amistosos (solo vía Odds API, no football-data.org)
+    9000: None,    # Amistosos internacionales
+    9001: None,    # Clasificatorias CONMEBOL
+    9002: None,    # Clasificatorias UEFA
+    9003: None,    # Clasificatorias CONCACAF
+    9004: None,    # Clasificatorias CAF
+    9005: None,    # Clasificatorias AFC
+    9006: None,    # Clasificatorias OFC
 }
 
 # Competiciones disponibles en plan gratuito

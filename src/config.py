@@ -22,6 +22,16 @@ SPORTS = {
     "soccer": "soccer_epl",
     "futbol_esp": "soccer_spain_la_liga",
     "futbol_champions": "soccer_uefa_champions_league",
+    # Selecciones nacionales
+    "mundial": "soccer_fifa_world_cup",
+    "amistosos": "soccer_international_friendlies",
+    "clasif_conmebol": "soccer_fifa_world_cup_qualifier_conmebol",
+    "clasif_uefa": "soccer_fifa_world_cup_qualifier_uefa",
+    "clasif_concacaf": "soccer_fifa_world_cup_qualifier_concacaf",
+    "clasif_caf": "soccer_fifa_world_cup_qualifier_caf",
+    "clasif_afc": "soccer_fifa_world_cup_qualifier_afc",
+    "clasif_ofc": "soccer_fifa_world_cup_qualifier_ofc",
+    # Otros deportes
     "nba": "basketball_nba",
     "nfl": "americanfootball_nfl",
     "mlb": "baseball_mlb",
@@ -32,6 +42,16 @@ SPORT_NAMES = {
     "soccer_epl": "Premier League",
     "soccer_spain_la_liga": "La Liga",
     "soccer_uefa_champions_league": "Champions League",
+    # Selecciones nacionales
+    "soccer_fifa_world_cup": "Copa del Mundo 2026",
+    "soccer_international_friendlies": "Amistosos Internacionales",
+    "soccer_fifa_world_cup_qualifier_conmebol": "Clasificatorias CONMEBOL",
+    "soccer_fifa_world_cup_qualifier_uefa": "Clasificatorias UEFA",
+    "soccer_fifa_world_cup_qualifier_concacaf": "Clasificatorias CONCACAF",
+    "soccer_fifa_world_cup_qualifier_caf": "Clasificatorias CAF",
+    "soccer_fifa_world_cup_qualifier_afc": "Clasificatorias AFC",
+    "soccer_fifa_world_cup_qualifier_ofc": "Clasificatorias OFC",
+    # Otros deportes
     "basketball_nba": "NBA",
     "americanfootball_nfl": "NFL",
     "baseball_mlb": "MLB",

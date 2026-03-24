@@ -205,6 +205,15 @@ LEAGUE_IDS = {
     "bundesliga": 78,
     "ligue_1": 61,
     "champions_league": 2,
+    # Selecciones nacionales
+    "mundial": 2000,
+    "amistosos": 9000,
+    "clasif_conmebol": 9001,
+    "clasif_uefa": 9002,
+    "clasif_concacaf": 9003,
+    "clasif_caf": 9004,
+    "clasif_afc": 9005,
+    "clasif_ofc": 9006,
 }
 
 LEAGUE_NAMES = {
@@ -214,6 +223,15 @@ LEAGUE_NAMES = {
     78: "Bundesliga",
     61: "Ligue 1",
     2: "Champions League",
+    # Selecciones nacionales
+    2000: "Copa del Mundo 2026",
+    9000: "Amistosos Internacionales",
+    9001: "Clasificatorias CONMEBOL",
+    9002: "Clasificatorias UEFA",
+    9003: "Clasificatorias CONCACAF",
+    9004: "Clasificatorias CAF",
+    9005: "Clasificatorias AFC",
+    9006: "Clasificatorias OFC",
 }
 
 # Mapeo de league_id (API-Football) a sport_key (The Odds API)
@@ -224,4 +242,13 @@ LEAGUE_TO_ODDS_SPORT = {
     78: "soccer_germany_bundesliga",
     61: "soccer_france_ligue_one",
     2: "soccer_uefa_champs_league",
+    # Selecciones nacionales
+    2000: "soccer_fifa_world_cup",
+    9000: "soccer_international_friendlies",
+    9001: "soccer_fifa_world_cup_qualifier_conmebol",
+    9002: "soccer_fifa_world_cup_qualifier_uefa",
+    9003: "soccer_fifa_world_cup_qualifier_concacaf",
+    9004: "soccer_fifa_world_cup_qualifier_caf",
+    9005: "soccer_fifa_world_cup_qualifier_afc",
+    9006: "soccer_fifa_world_cup_qualifier_ofc",
 }
