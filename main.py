@@ -23,6 +23,7 @@ from src.handlers.admin_handlers import (
     cancel_tip, set_result, add_vip_user, remove_vip_user,
     broadcast, admin_panel,
     resolve_prediction_command, precision_command, pending_predictions_command,
+    backtest_command,
     SPORT, MATCH, PREDICTION, ODDS, STAKE, CONFIDENCE, VIP_CHOICE,
 )
 from src.handlers.analysis_handlers import (
@@ -138,6 +139,7 @@ def main():
     app.add_handler(CommandHandler("precision", precision_command))
     app.add_handler(CommandHandler("calibracion", precision_command))
     app.add_handler(CommandHandler("pendientes", pending_predictions_command))
+    app.add_handler(CommandHandler("backtest", backtest_command))
     app.add_handler(CommandHandler("admin", admin_panel))
 
     # Callback queries específicos (antes del genérico)

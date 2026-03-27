@@ -971,6 +971,133 @@ def analyze_line_movement(odds_history: list) -> list[str]:
     return lines
 
 
+def _build_data_quality(
+    home: TeamAnalysis, away: TeamAnalysis, h2h: dict,
+    probs: dict, odds_history: list = None,
+) -> dict:
+    """Construye el semáforo de calidad de datos del análisis.
+
+    Evalúa cada fuente de datos y muestra al usuario qué tan fiable
+    es el análisis basándose en qué datos reales están disponibles.
+
+    Returns: {"lines": [...], "summary": str, "score": int (0-100)}
+    """
+    checks = []
+    score = 0
+    max_score = 0
+
+    # 1. Forma actualizada (partidos recientes reales)
+    max_score += 25
+    home_has_form = home.matches_played >= 5 and home.form_detail != "?"
+    away_has_form = away.matches_played >= 5 and away.form_detail != "?"
+
+    # Detectar datos obsoletos (último partido > 30 días)
+    stale = False
+    if home.last_match_date or away.last_match_date:
+        try:
+            for lmd in [home.last_match_date, away.last_match_date]:
+                if lmd:
+                    last_dt = datetime.fromisoformat(lmd.replace("Z", "+00:00"))
+                    days_ago = (datetime.now(last_dt.tzinfo) - last_dt).days if last_dt.tzinfo else (datetime.now() - last_dt).days
+                    if days_ago > 30:
+                        stale = True
+        except Exception:
+            pass
+
+    if home_has_form and away_has_form and not stale:
+        checks.append(("Forma actualizada", "green", f"{home.matches_played}+{away.matches_played} partidos"))
+        score += 25
+    elif home_has_form and away_has_form and stale:
+        checks.append(("Forma desactualizada", "yellow", f"datos de hace >30 días"))
+        score += 15
+    elif home_has_form or away_has_form:
+        n = home.matches_played + away.matches_played
+        checks.append(("Forma parcial", "yellow", f"solo {n} partidos"))
+        score += 12
+    else:
+        checks.append(("Forma reciente", "red", "sin datos de partidos"))
+
+    # 2. xG real (Understat)
+    max_score += 25
+    if probs.get("has_real_xg"):
+        checks.append(("xG real (Understat)", "green", f"{home.real_xg:.2f} / {away.real_xg:.2f}"))
+        score += 25
+    elif home.real_xg > 0 or away.real_xg > 0:
+        checks.append(("xG parcial", "yellow", "solo 1 equipo"))
+        score += 10
+    else:
+        checks.append(("xG real", "red", "no disponible — usando promedios"))
+
+    # 3. FBref / StatsBomb
+    max_score += 20
+    if probs.get("has_fbref"):
+        checks.append(("FBref/StatsBomb", "green", f"SCA {home.sca_p90:.1f} vs {away.sca_p90:.1f}"))
+        score += 20
+    elif home.sca_p90 > 0 or away.sca_p90 > 0:
+        checks.append(("FBref parcial", "yellow", "solo 1 equipo"))
+        score += 8
+    else:
+        checks.append(("FBref avanzados", "red", "sin pressing/SCA/progresión"))
+
+    # 4. Odds del mercado (market anchor)
+    max_score += 20
+    if probs.get("has_market_anchor"):
+        checks.append(("Odds del mercado", "green", "market anchor activo (55/45)"))
+        score += 20
+    else:
+        checks.append(("Odds del mercado", "red", "sin cuotas — modelo puro"))
+
+    # 5. H2H
+    max_score += 5
+    h2h_total = h2h.get("home_wins", 0) + h2h.get("away_wins", 0) + h2h.get("draws", 0)
+    if h2h_total >= 3:
+        checks.append(("H2H histórico", "green", f"{h2h_total} enfrentamientos"))
+        score += 5
+    elif h2h_total > 0:
+        checks.append(("H2H limitado", "yellow", f"solo {h2h_total}"))
+        score += 2
+    else:
+        checks.append(("H2H", "red", "sin historial directo"))
+
+    # 6. Calibración (learning)
+    max_score += 5
+    cal = probs.get("calibration_applied", [])
+    if cal:
+        checks.append(("Calibración IA", "green", f"{len(cal)} correcciones"))
+        score += 5
+    else:
+        checks.append(("Calibración", "yellow", "sin correcciones (pocas muestras)"))
+
+    # Build semáforo visual
+    pct = (score / max_score * 100) if max_score else 0
+    if pct >= 80:
+        grade = "ALTA"
+        grade_emoji = "🟢"
+    elif pct >= 50:
+        grade = "MEDIA"
+        grade_emoji = "🟡"
+    else:
+        grade = "BAJA"
+        grade_emoji = "🔴"
+
+    color_map = {"green": "✅", "yellow": "🟡", "red": "❌"}
+
+    lines = [f"🚦 *CALIDAD DE DATOS: {grade_emoji} {grade}* ({pct:.0f}%)"]
+    for label, color, detail in checks:
+        emoji = color_map[color]
+        lines.append(f"  {emoji} {label} — _{detail}_")
+
+    # Advertencia si calidad baja
+    if pct < 50:
+        lines.append("")
+        lines.append("  ⚠️ _Análisis con datos limitados. Confía más en las odds del mercado._")
+
+    summary_parts = [label for label, color, _ in checks if color == "green"]
+    summary = " + ".join(summary_parts) if summary_parts else "Solo modelo básico"
+
+    return {"lines": lines, "summary": summary, "score": score}
+
+
 def format_analysis_report(
     home: TeamAnalysis,
     away: TeamAnalysis,
@@ -1054,15 +1181,13 @@ def format_analysis_report(
             injured_names = ", ".join(away.injuries[:5])
             lines.append(f"✈️ {away.name}: {injured_names}")
 
-    # Indicador de calidad de datos
-    data_flags = []
-    if probs.get("has_real_xg"):
-        data_flags.append("xG Real")
-    if probs.get("has_fbref"):
-        data_flags.append("FBref/StatsBomb")
-    if probs.get("has_market_anchor"):
-        data_flags.append("Market Anchor")
-    data_quality = " + ".join(data_flags) if data_flags else "Solo modelo básico"
+    # ══ SEMÁFORO DE CALIDAD DE DATOS ══
+    dq = _build_data_quality(home, away, h2h, probs, odds_history)
+    lines.extend(["", f"{'═' * 28}", ""])
+    lines.extend(dq["lines"])
+    lines.append("")
+
+    data_quality = dq["summary"]
 
     # xG real de Understat si disponible
     if home.real_xg > 0 or away.real_xg > 0:

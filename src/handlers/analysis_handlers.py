@@ -838,6 +838,22 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
         away_analysis.injuries = away_injuries
         away_analysis.injuries_count = len(away_injuries)
 
+    # Alineaciones confirmadas (si están disponibles ~1h antes del partido)
+    lineup_text = ""
+    try:
+        from src.services.lineup_service import get_match_lineups, format_lineups
+        lineups = await get_match_lineups(
+            fd_match_id=fd_match_id,
+            fd_api_key=FOOTBALL_DATA_API_KEY,
+            football_api_key=FOOTBALL_API_KEY,
+            api_football_fixture_id=fixture.get("fixture", {}).get("id"),
+        )
+        if lineups and lineups.available:
+            lineup_text = format_lineups(lineups)
+            logger.info(f"Lineups disponibles: {lineups.home.formation} vs {lineups.away.formation}")
+    except Exception as e:
+        logger.warning(f"Lineup fetch error: {e}")
+
     # Cuotas del mercado PRIMERO (para market anchor)
     odds = await _get_odds_for_match(league_id, fixture, home_name, away_name)
 
@@ -877,6 +893,10 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
 
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
                                     odds_history=odds_hist)
+
+    # Alineaciones confirmadas (si están disponibles)
+    if lineup_text:
+        report += f"\n\n{'═' * 28}\n{lineup_text}"
 
     # Análisis IA (cerebro contextual)
     ai = get_ai_service()

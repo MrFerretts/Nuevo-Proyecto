@@ -519,3 +519,61 @@ async def pending_predictions_command(update: Update, context: ContextTypes.DEFA
     if len(text) > 4096:
         text = text[:4090] + "..."
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backtest de value bets — disponible para todos.
+
+    Uso:
+      /backtest                  → Backtest general (90 días, todas las apuestas)
+      /backtest alta             → Solo confianza alta
+      /backtest 7%               → Solo edge >= 7%
+      /backtest alta 7% kelly    → Confianza alta + edge 7% + stake Kelly
+      /backtest 180              → Últimos 180 días
+    """
+    from src.services.backtester import run_backtest, format_backtest
+
+    # Parse arguments
+    args = (context.args or [])
+    min_edge = 0.0
+    confidence = ""
+    days = 90
+    stake_mode = "flat"
+
+    for arg in args:
+        arg_lower = arg.lower().strip()
+        # Confidence
+        if arg_lower in ("baja", "media", "alta", "muy_alta"):
+            confidence = arg_lower
+        # Edge (e.g., "5%", "7%", "10%")
+        elif "%" in arg_lower:
+            try:
+                min_edge = float(arg_lower.replace("%", "")) / 100
+            except ValueError:
+                pass
+        # Stake mode
+        elif arg_lower == "kelly":
+            stake_mode = "kelly"
+        elif arg_lower == "flat":
+            stake_mode = "flat"
+        # Days (number without %)
+        elif arg_lower.isdigit():
+            days = int(arg_lower)
+
+    await update.message.reply_text("📊 Ejecutando backtest... un momento.")
+
+    result = await run_backtest(
+        min_edge=min_edge,
+        confidence=confidence,
+        days=days,
+        stake_mode=stake_mode,
+    )
+
+    text = format_backtest(result)
+
+    if len(text) > 4096:
+        parts = [text[i:i + 4096] for i in range(0, len(text), 4096)]
+        for part in parts:
+            await update.message.reply_text(part, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
