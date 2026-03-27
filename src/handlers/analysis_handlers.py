@@ -19,6 +19,7 @@ from src.services.analysis_engine import (
     TeamAnalysis, analyze_form, analyze_goals, analyze_h2h,
     find_team_in_standings, estimate_probabilities, find_value_bets,
     format_analysis_report, calculate_league_averages_from_standings,
+    calculate_composite_scores,
 )
 from src.services.ai_analysis_service import AIAnalysisService
 
@@ -891,14 +892,9 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     except Exception:
         odds_hist = None
 
-    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
-                                    odds_history=odds_hist)
-
-    # Alineaciones confirmadas (si están disponibles)
-    if lineup_text:
-        report += f"\n\n{'═' * 28}\n{lineup_text}"
-
-    # Análisis IA (cerebro contextual)
+    # Análisis IA (cerebro contextual) — ANTES del reporte para tener brain_data
+    ai_text = None
+    brain_data = None
     ai = get_ai_service()
     if ai:
         try:
@@ -908,10 +904,30 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
                 odds=odds,
                 line_movement=odds_hist,
             )
-            if ai_text and isinstance(ai_text, str):
-                report += f"\n\n{'═' * 28}\n\n{ai_text}"
         except Exception as e:
             logger.warning(f"AI brain analysis error: {e}")
+
+    # Score compuesto (0-100) — combina edge + calidad + IA + calibración + line movement
+    from src.services.analysis_engine import _build_data_quality
+    dq = _build_data_quality(home_analysis, away_analysis, h2h, probs, odds_hist)
+    calculate_composite_scores(
+        suggestions, probs,
+        brain_data=brain_data,
+        odds_history=odds_hist,
+        data_quality_score=dq["score"],
+    )
+
+    # Generar reporte (ahora con composite scores)
+    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions,
+                                    odds_history=odds_hist)
+
+    # Alineaciones confirmadas
+    if lineup_text:
+        report += f"\n\n{'═' * 28}\n{lineup_text}"
+
+    # Añadir análisis IA al reporte
+    if ai_text and isinstance(ai_text, str):
+        report += f"\n\n{'═' * 28}\n\n{ai_text}"
 
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
@@ -1039,9 +1055,9 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
 
     suggestions = find_value_bets(probs, odds)
 
-    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
-
-    # Análisis IA (cerebro contextual)
+    # Análisis IA — ANTES del reporte para tener brain_data
+    ai_text = None
+    brain_data = None
     ai = get_ai_service()
     if ai:
         try:
@@ -1050,10 +1066,23 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
                 league_name=LEAGUE_NAMES.get(league_id, ""),
                 odds=odds,
             )
-            if ai_text and isinstance(ai_text, str):
-                report += f"\n\n{'═' * 28}\n\n{ai_text}"
         except Exception as e:
             logger.warning(f"AI brain analysis error (fallback): {e}")
+
+    # Score compuesto (0-100)
+    from src.services.analysis_engine import _build_data_quality
+    dq = _build_data_quality(home_analysis, away_analysis, h2h, probs, None)
+    calculate_composite_scores(
+        suggestions, probs,
+        brain_data=brain_data,
+        odds_history=None,
+        data_quality_score=dq["score"],
+    )
+
+    report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
+
+    if ai_text and isinstance(ai_text, str):
+        report += f"\n\n{'═' * 28}\n\n{ai_text}"
 
     # Guardar predicción para tracking
     match_date = fixture.get("fixture", {}).get("date", "")

@@ -103,6 +103,7 @@ class BetSuggestion:
     confidence: str       # baja, media, alta, muy_alta
     stake: int            # 1-5 recomendado
     reasoning: list       # Lista de razones
+    composite_score: int = 0  # Score compuesto 0-100 (se calcula post-análisis)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -869,6 +870,197 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
     return suggestions
 
 
+# ══════════════════════════════════════════════════════════════════
+# SCORE DE CONFIANZA COMPUESTO (0-100)
+# ══════════════════════════════════════════════════════════════════
+
+def calculate_composite_scores(
+    suggestions: list,
+    probs: dict,
+    brain_data: dict = None,
+    odds_history: list = None,
+    data_quality_score: int = 0,
+) -> list:
+    """Calcula el score compuesto para cada BetSuggestion.
+
+    Fórmula:
+      Score = (edge × 30%) + (calidad_datos × 25%) + (conviction_IA × 20%)
+            + (calibración_histórica × 15%) + (line_movement × 10%)
+
+    Cada componente se normaliza a 0-100 antes de ponderar.
+
+    Thresholds:
+      >= 70  → APOSTAR
+      50-69  → WATCHLIST
+      < 50   → PASAR
+
+    Args:
+        suggestions: lista de BetSuggestion a puntuar
+        probs: dict de probabilidades (incluye has_real_xg, etc.)
+        brain_data: output del cerebro IA (conviction, evaluaciones)
+        odds_history: historial de odds para line movement
+        data_quality_score: score 0-100 del semáforo de calidad
+
+    Returns: las mismas suggestions con composite_score actualizado
+    """
+    if not suggestions:
+        return suggestions
+
+    # Pre-calcular componentes compartidos
+
+    # 2. Calidad de datos (0-100) — viene del semáforo
+    dq_score = min(100, max(0, data_quality_score))
+
+    # 3. Conviction IA (0-100) — de brain_data
+    ia_conviction_raw = 5  # default neutral
+    ia_evaluations = {}
+    if brain_data:
+        ia_conviction_raw = brain_data.get("best_bet", {}).get("conviction", 5)
+        # Map evaluations by pick name for per-suggestion lookup
+        for ev in brain_data.get("value_bets_evaluation", []):
+            pick_name = ev.get("pick", "").lower()
+            ia_evaluations[pick_name] = ev
+
+    # 4. Calibración histórica (0-100)
+    cal_applied = probs.get("calibration_applied", [])
+    # Si hay calibración activa, el modelo se ha corregido → más confiable
+    # Sin calibración con pocas muestras → menos confiable
+    if cal_applied:
+        cal_score = 80  # Calibración activa = bueno
+    elif probs.get("has_market_anchor"):
+        cal_score = 60  # Market anchor compensa falta de calibración propia
+    else:
+        cal_score = 30  # Sin calibración ni market anchor
+
+    # 5. Line movement (0-100)
+    lm_score = _score_line_movement(odds_history)
+
+    # Calcular por sugerencia
+    for s in suggestions:
+        # 1. Edge (0-100): normalizar edge [0%, 20%+] → [0, 100]
+        edge_pct = s.value  # ya es decimal (0.05 = 5%)
+        edge_score = min(100, (edge_pct / 0.20) * 100)
+
+        # 3b. Conviction IA per-suggestion
+        suggestion_conviction = ia_conviction_raw * 10  # 0-10 → 0-100
+
+        # Buscar evaluación específica de la IA para este pick
+        ia_penalty = 0  # Penalización directa si IA rechaza
+        pick_lower = s.pick.lower()
+        for ev_key, ev_data in ia_evaluations.items():
+            if ev_key in pick_lower or pick_lower in ev_key:
+                verdict = ev_data.get("verdict", "")
+                if verdict == "CONFIRMAR":
+                    suggestion_conviction = min(100, suggestion_conviction + 20)
+                elif verdict == "RECHAZAR":
+                    suggestion_conviction = max(0, suggestion_conviction - 40)
+                    ia_penalty = 15  # Penalty extra: IA dice NO
+                elif verdict == "PRECAUCIÓN":
+                    suggestion_conviction = max(0, suggestion_conviction - 15)
+                    ia_penalty = 5
+                break
+
+        # 5b. Line movement per-pick: ¿la línea se mueve a favor de este pick?
+        pick_lm = lm_score
+        if odds_history and len(odds_history) >= 2:
+            pick_lm = _score_line_movement_for_pick(odds_history, s.pick)
+
+        # Composite score con pesos
+        score = (
+            edge_score * 0.30 +
+            dq_score * 0.25 +
+            suggestion_conviction * 0.20 +
+            cal_score * 0.15 +
+            pick_lm * 0.10
+        ) - ia_penalty  # Penalización directa por rechazo IA
+
+        s.composite_score = int(min(100, max(0, round(score))))
+
+    return suggestions
+
+
+def _score_line_movement(odds_history: list) -> int:
+    """Puntúa el line movement general (0-100).
+
+    50 = neutral (sin movimiento o datos insuficientes)
+    >50 = movimiento detectado (dinero entrando)
+    <50 = movimiento contrario
+    """
+    if not odds_history or len(odds_history) < 2:
+        return 50  # Neutral
+
+    first = odds_history[0]
+    last = odds_history[-1]
+
+    total_shift = 0
+    for key in ["home_odds", "draw_odds", "away_odds"]:
+        old = first.get(key, 0)
+        new = last.get(key, 0)
+        if old > 1 and new > 1:
+            shift = abs((1 / new) - (1 / old))
+            total_shift += shift
+
+    # Normalizar: 0 shift = 50, >0.15 total shift = 80+
+    return min(90, int(50 + total_shift * 200))
+
+
+def _score_line_movement_for_pick(odds_history: list, pick: str) -> int:
+    """Puntúa si el line movement favorece un pick específico.
+
+    Si la cuota del pick BAJA (dinero entrando) → score alto.
+    Si SUBE (dinero saliendo) → score bajo.
+    """
+    if not odds_history or len(odds_history) < 2:
+        return 50
+
+    first = odds_history[0]
+    last = odds_history[-1]
+
+    pick_lower = pick.lower()
+
+    # Mapear pick a odds key
+    if "local" in pick_lower or "home" in pick_lower or "1x" in pick_lower:
+        key = "home_odds"
+    elif "visitante" in pick_lower or "away" in pick_lower or "x2" in pick_lower:
+        key = "away_odds"
+    elif "empate" in pick_lower or "draw" in pick_lower:
+        key = "draw_odds"
+    elif "over" in pick_lower:
+        return 50  # Totals no suelen tener line movement tracking
+    elif "under" in pick_lower:
+        return 50
+    else:
+        return 50
+
+    old = first.get(key, 0)
+    new = last.get(key, 0)
+    if old <= 1 or new <= 1:
+        return 50
+
+    # Cuota bajó = dinero entra = favorable
+    shift = (1 / new) - (1 / old)
+    # shift > 0 = cuota bajó = favorable, shift < 0 = cuota subió = desfavorable
+    # Normalizar: ±0.10 shift = ±30 points
+    return int(min(90, max(10, 50 + shift * 300)))
+
+
+def format_composite_score(score: int) -> str:
+    """Formatea el score compuesto para display."""
+    if score >= 70:
+        bar = "🟩" * (score // 10) + "⬜" * (10 - score // 10)
+        label = "APOSTAR"
+        emoji = "✅"
+    elif score >= 50:
+        bar = "🟨" * (score // 10) + "⬜" * (10 - score // 10)
+        label = "WATCHLIST"
+        emoji = "👀"
+    else:
+        bar = "🟥" * (score // 10) + "⬜" * (10 - score // 10)
+        label = "PASAR"
+        emoji = "⛔"
+    return f"{emoji} *{score}/100* {bar} → *{label}*"
+
+
 def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: float,
                      value: float, odds: float, probs: dict = None,
                      kelly: float = 0) -> list[str]:
@@ -1272,9 +1464,20 @@ def format_analysis_report(
         for i, s in enumerate(suggestions[:5], 1):
             emoji = confidence_emoji.get(s.confidence, "🟠")
             stake_stars = "⭐" * s.stake
+
+            # Composite score con veredicto
+            if s.composite_score > 0:
+                score_line = f"   🔢 {format_composite_score(s.composite_score)}"
+            else:
+                score_line = None
+
             lines.extend([
                 "",
                 f"{emoji} *{i}. {s.pick}*",
+            ])
+            if score_line:
+                lines.append(score_line)
+            lines.extend([
                 f"   📊 Cuota: *{s.odds:.2f}* | Valor: *+{s.value:.1%}*",
                 f"   💰 Stake: {stake_stars} ({s.stake}/5)",
                 f"   🎯 Confianza: *{s.confidence.upper()}*",
