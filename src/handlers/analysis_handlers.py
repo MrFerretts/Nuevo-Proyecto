@@ -925,9 +925,15 @@ async def run_fd_analysis(fixture: dict, league_id: int) -> str:
     if lineup_text:
         report += f"\n\n{'═' * 28}\n{lineup_text}"
 
-    # Añadir análisis IA al reporte
+    # Añadir análisis IA SEPARADO — forma tu opinión con los números primero
     if ai_text and isinstance(ai_text, str):
-        report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        report += (
+            f"\n\n{'═' * 28}\n\n"
+            f"💭 *OPINIÓN IA (léelo después de formar tu criterio)*\n"
+            f"_Generado por LLM — puede sonar convincente sin serlo._\n"
+            f"_Úsalo como segunda opinión, no como base de tu decisión._\n\n"
+            f"{ai_text}"
+        )
 
     # Guardar predicción para tracking (con fd_match_id para auto-resolución)
     match_date = fixture.get("fixture", {}).get("date", "")
@@ -1082,7 +1088,13 @@ async def run_full_analysis(fixture: dict, league_id: int, season: int) -> str:
     report = format_analysis_report(home_analysis, away_analysis, h2h, probs, suggestions)
 
     if ai_text and isinstance(ai_text, str):
-        report += f"\n\n{'═' * 28}\n\n{ai_text}"
+        report += (
+            f"\n\n{'═' * 28}\n\n"
+            f"💭 *OPINIÓN IA (léelo después de formar tu criterio)*\n"
+            f"_Generado por LLM — puede sonar convincente sin serlo._\n"
+            f"_Úsalo como segunda opinión, no como base de tu decisión._\n\n"
+            f"{ai_text}"
+        )
 
     # Guardar predicción para tracking
     match_date = fixture.get("fixture", {}).get("date", "")
@@ -1311,29 +1323,26 @@ async def opportunities_command(update: Update, context: ContextTypes.DEFAULT_TY
     # Ordenar por valor y mostrar top oportunidades
     all_suggestions.sort(key=lambda x: x["suggestion"].value, reverse=True)
 
-    confidence_emoji = {"baja": "🟡", "media": "🟠", "alta": "🔴", "muy_alta": "💎"}
     lines = [
-        "🔍 *OPORTUNIDADES DETECTADAS*",
+        "🔍 *DISCREPANCIAS DETECTADAS*",
         f"📅 Escaneadas {len(LEAGUE_IDS)} ligas",
-        f"💡 {len(all_suggestions)} apuestas con valor encontradas",
+        f"📐 {len(all_suggestions)} diferencias modelo vs mercado",
         "",
         f"{'═' * 28}",
     ]
 
     for i, item in enumerate(all_suggestions[:10], 1):
         s = item["suggestion"]
-        emoji = confidence_emoji.get(s.confidence, "🟠")
-        stake_stars = "⭐" * s.stake
         lines.extend([
             "",
-            f"{emoji} *{i}. {item['match']}*",
+            f"*{i}. {item['match']}*",
             f"   🏅 {item['league']} | 📅 {item['date']}",
-            f"   💡 *{s.pick}*",
-            f"   📊 Cuota: *{s.odds:.2f}* | Valor: *+{s.value:.1%}*",
-            f"   💰 Stake: {stake_stars} | Confianza: *{s.confidence.upper()}*",
+            f"   📐 *{s.pick}*",
+            f"   Modelo: *{s.estimated_prob:.0%}* vs Mercado: *{s.implied_prob:.0%}* (+{s.value:.1%}) @ {s.odds:.2f}",
+            f"   Kelly: {s.stake}u | Base: _{s.data_basis}_",
         ])
-        for reason in s.reasoning[:2]:
-            lines.append(f"   • {reason}")
+        if s.noise_warning:
+            lines.append(f"   ⚠️ _{s.noise_warning}_")
 
     lines.extend([
         "",

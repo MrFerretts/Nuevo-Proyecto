@@ -101,9 +101,11 @@ class BetSuggestion:
     odds: float           # Cuota del mercado
     value: float          # Edge = estimated - implied (positivo = valor)
     confidence: str       # baja, media, alta, muy_alta
-    stake: int            # 1-5 recomendado
+    stake: int            # 1-5 recomendado (Kelly)
     reasoning: list       # Lista de razones
-    composite_score: int = 0  # Score compuesto 0-100 (se calcula post-análisis)
+    composite_score: int = 0   # Score compuesto 0-100 (informativo, no prescriptivo)
+    data_basis: str = ""       # De dónde viene el edge: "xG+mercado", "solo modelo", etc.
+    noise_warning: str = ""    # Si el edge podría ser ruido estadístico
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -808,6 +810,20 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
         ("Doble Oportunidad", "Local o Visitante (12)", probs.get("home_or_away", 0), odds.get("home_or_away", 0)),
     ]
 
+    has_market = probs.get("has_market_anchor", False)
+    has_xg = probs.get("has_real_xg", False)
+    has_fbref = probs.get("has_fbref", False)
+
+    # Determinar la base de datos del modelo
+    data_sources = []
+    if has_xg:
+        data_sources.append("xG real")
+    if has_fbref:
+        data_sources.append("FBref")
+    if has_market:
+        data_sources.append("mercado")
+    data_basis = " + ".join(data_sources) if data_sources else "solo modelo"
+
     for market, pick, est_prob, market_odds in markets:
         if market_odds <= 1.0 or est_prob <= 0:
             continue
@@ -815,15 +831,15 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
         implied_prob = 1 / market_odds
         value = est_prob - implied_prob
 
-        # Edge mínimo: 5% (subido de 3% para reducir falsos positivos)
-        if value > 0.05:
-            # Kelly Criterion: fracción óptima del bankroll
-            # f* = (bp - q) / b donde b=odds-1, p=prob ganar, q=1-p
+        # Edge mínimo: 2% — mostrar todas las discrepancias significativas
+        # El usuario decide si actuar, no el bot
+        if value > 0.02:
+            # Kelly Criterion
             b = market_odds - 1
             kelly_fraction = (b * est_prob - (1 - est_prob)) / b if b > 0 else 0
-            kelly_fraction = max(0, min(0.25, kelly_fraction))  # Cap al 25%
+            kelly_fraction = max(0, min(0.25, kelly_fraction))
 
-            # Confianza y stake basados en Kelly + edge
+            # Confianza basada en Kelly (descriptiva, no prescriptiva)
             if kelly_fraction > 0.10:
                 confidence = "muy_alta"
                 stake = 5
@@ -837,18 +853,15 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
                 confidence = "baja"
                 stake = 2
 
-            # Reducir stake para cuotas altas (más varianza)
             if market_odds > 3.5:
                 stake = max(1, stake - 1)
-
-            # Reducir confianza si no tenemos market anchor o xG real
-            has_market = probs.get("has_market_anchor", False)
-            has_xg = probs.get("has_real_xg", False)
-            has_fbref = probs.get("has_fbref", False)
             if not has_market and not has_xg and not has_fbref:
                 stake = max(1, stake - 1)
                 if confidence == "muy_alta":
                     confidence = "alta"
+
+            # Evaluación honesta de ruido
+            noise_warning = _assess_noise(value, has_market, has_xg, has_fbref, market_odds)
 
             reasoning = _build_reasoning(market, pick, est_prob, implied_prob,
                                          value, market_odds, probs, kelly_fraction)
@@ -863,11 +876,43 @@ def find_value_bets(probs: dict, odds: dict) -> list[BetSuggestion]:
                 confidence=confidence,
                 stake=stake,
                 reasoning=reasoning,
+                data_basis=data_basis,
+                noise_warning=noise_warning,
             ))
 
     # Ordenar por valor descendente
     suggestions.sort(key=lambda x: x.value, reverse=True)
     return suggestions
+
+
+def _assess_noise(edge: float, has_market: bool, has_xg: bool,
+                  has_fbref: bool, odds: float) -> str:
+    """Evalúa honestamente cuánto del edge podría ser ruido.
+
+    No intenta ser prescriptivo — solo informa la calidad de la señal.
+    """
+    sources = sum([has_market, has_xg, has_fbref])
+
+    # Cuota alta siempre merece aviso de varianza
+    if odds > 4.0 and edge < 0.12:
+        return "Cuota alta = más varianza, edge menos fiable"
+    # Edge < 5% con market anchor: el mercado es eficiente, difícil que sea real
+    if edge < 0.05 and has_market:
+        return "Edge <5% contra mercado eficiente — puede ser ruido"
+    # Edge < 5% sin datos: casi seguro ruido
+    if edge < 0.05 and sources < 2:
+        return "Edge <5% con datos limitados — probablemente ruido"
+    # Edge moderado sin stats avanzados
+    if edge < 0.08 and not has_xg and not has_fbref:
+        return "Sin xG real ni stats avanzados — verificar"
+    # Edge sólido con buen soporte
+    if edge >= 0.08 and sources >= 2:
+        return ""
+    if edge >= 0.08 and has_market:
+        return ""
+    if edge >= 0.05 and sources >= 1:
+        return ""
+    return "Datos limitados — verificar con tu criterio"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1045,20 +1090,21 @@ def _score_line_movement_for_pick(odds_history: list, pick: str) -> int:
 
 
 def format_composite_score(score: int) -> str:
-    """Formatea el score compuesto para display."""
-    if score >= 70:
-        bar = "🟩" * (score // 10) + "⬜" * (10 - score // 10)
-        label = "APOSTAR"
-        emoji = "✅"
-    elif score >= 50:
-        bar = "🟨" * (score // 10) + "⬜" * (10 - score // 10)
-        label = "WATCHLIST"
-        emoji = "👀"
+    """Formatea el score compuesto para display (contexto, no veredicto)."""
+    ctx = _score_context(score)
+    return f"*{score}/100* — _{ctx}_"
+
+
+def _score_context(score: int) -> str:
+    """Describe el score sin ser prescriptivo."""
+    if score >= 75:
+        return "señal fuerte en múltiples fuentes"
+    elif score >= 60:
+        return "señal moderada, datos razonables"
+    elif score >= 45:
+        return "señal débil o datos incompletos"
     else:
-        bar = "🟥" * (score // 10) + "⬜" * (10 - score // 10)
-        label = "PASAR"
-        emoji = "⛔"
-    return f"{emoji} *{score}/100* {bar} → *{label}*"
+        return "datos insuficientes o señal contradictoria"
 
 
 def _build_reasoning(market: str, pick: str, est_prob: float, implied_prob: float,
@@ -1457,38 +1503,28 @@ def format_analysis_report(
             "",
             f"{'═' * 28}",
             "",
-            f"💡 *APUESTAS CON VALOR DETECTADAS*",
+            f"📐 *DISCREPANCIAS MODELO vs MERCADO*",
+            f"_Datos crudos — tú decides_",
         ])
-        confidence_emoji = {"baja": "🟡", "media": "🟠", "alta": "🔴", "muy_alta": "💎"}
 
-        for i, s in enumerate(suggestions[:5], 1):
-            emoji = confidence_emoji.get(s.confidence, "🟠")
-            stake_stars = "⭐" * s.stake
-
-            # Composite score con veredicto
-            if s.composite_score > 0:
-                score_line = f"   🔢 {format_composite_score(s.composite_score)}"
-            else:
-                score_line = None
-
+        for i, s in enumerate(suggestions[:6], 1):
             lines.extend([
                 "",
-                f"{emoji} *{i}. {s.pick}*",
+                f"*{i}. {s.pick}*",
+                f"   Modelo: *{s.estimated_prob:.1%}* → Mercado: *{s.implied_prob:.1%}* (cuota {s.odds:.2f})",
+                f"   Diferencia: *+{s.value:.1%}* | Kelly: {s.stake}u | Base: _{s.data_basis}_",
             ])
-            if score_line:
-                lines.append(score_line)
-            lines.extend([
-                f"   📊 Cuota: *{s.odds:.2f}* | Valor: *+{s.value:.1%}*",
-                f"   💰 Stake: {stake_stars} ({s.stake}/5)",
-                f"   🎯 Confianza: *{s.confidence.upper()}*",
-            ])
-            for reason in s.reasoning:
-                lines.append(f"   • {reason}")
+            # Warning de ruido — honesto sobre incertidumbre
+            if s.noise_warning:
+                lines.append(f"   ⚠️ _{s.noise_warning}_")
+            # Score compuesto como contexto (no como veredicto)
+            if s.composite_score > 0:
+                lines.append(f"   📊 Score: {s.composite_score}/100 _{_score_context(s.composite_score)}_")
     else:
         lines.extend([
             "",
-            "⚠️ *No se encontraron apuestas con valor claro en este partido.*",
-            "Las cuotas del mercado parecen ajustadas a las probabilidades reales.",
+            "📐 *Sin discrepancias significativas (>2%) entre modelo y mercado.*",
+            "_Las cuotas parecen ajustadas. Mercado eficiente en este partido._",
         ])
 
     # Line movement (si hay historial de odds)
